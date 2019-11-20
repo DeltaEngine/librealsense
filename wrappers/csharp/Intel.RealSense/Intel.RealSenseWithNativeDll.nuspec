@@ -1,0 +1,26 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Intel.RealSenseWithNativeDll</id>
+    <version>2.30.0</version>
+    <authors>Intel</authors>
+    <owners>Intel</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+	  <license type="expression">Apache-2.0</license>
+    <projectUrl>https://github.com/IntelRealSense/librealsense</projectUrl>
+    <iconUrl>https://avatars3.githubusercontent.com/u/14095512?s=128</iconUrl>
+    <description>Intel® RealSense™ SDK 2.0 is a cross-platform library for Intel® RealSense™ depth cameras (D400 series and the SR300) and the T265 tracking camera.
+
+This version automatically copies the required native realsense2.dll from Intel® RealSense™ SDK 2.0 (build 2.30.0)</description>
+    <repository url="https://github.com/IntelRealSense/librealsense" />
+    <references>
+      <reference file="Intel.RealSense.dll" />
+    </references>
+		<tags>Intel RealSense D435 D415 Wrapper 3D Depth Camera Native Dll</tags>
+  </metadata>
+  <files>
+    <file src="realsense2.dll" target="build" />
+    <file src="Intel.RealSenseWithNativeDll.targets" target="build" />
+    <file src="bin\Release\netcoreapp3.0\Intel.RealSense.dll" target="lib/netcoreapp3.0"/>
+  </files>
+</package>
