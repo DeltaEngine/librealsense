@@ -12,9 +12,12 @@ import com.intel.realsense.librealsense.DeviceList;
 import com.intel.realsense.librealsense.Extension;
 import com.intel.realsense.librealsense.FrameSet;
 import com.intel.realsense.librealsense.MotionStreamProfile;
+import com.intel.realsense.librealsense.Option;
 import com.intel.realsense.librealsense.Pipeline;
+import com.intel.realsense.librealsense.PipelineProfile;
 import com.intel.realsense.librealsense.ProductLine;
 import com.intel.realsense.librealsense.RsContext;
+import com.intel.realsense.librealsense.Sensor;
 import com.intel.realsense.librealsense.StreamProfile;
 import com.intel.realsense.librealsense.VideoStreamProfile;
 
@@ -50,7 +53,7 @@ public class Streamer {
         @Override
         public void run() {
             try {
-                try(FrameSet frames = mPipeline.waitForFrames(1000)) {
+                try(FrameSet frames = mPipeline.waitForFrames()) {
                     mListener.onFrameset(frames);
                 }
                 mHandler.post(mStreaming);
@@ -123,7 +126,8 @@ public class Streamer {
                 configStream(config);
             if(mListener != null)
                 mListener.config(config);
-            mPipeline.start(config);
+            // try statement needed here to release resources allocated by the Pipeline:start() method
+            try (PipelineProfile pp = mPipeline.start(config)){}
         }
     }
 

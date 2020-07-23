@@ -1,28 +1,30 @@
 package com.intel.realsense.librealsense;
 
-
 public class Pipeline extends LrsClass{
     public Pipeline(){
-        RsContext ctx = new RsContext();
+        try(RsContext ctx = new RsContext()) {
+            mHandle = nCreate(ctx.getHandle());
+        }
+    }
+
+    public Pipeline(RsContext ctx){
         mHandle = nCreate(ctx.getHandle());
     }
 
-    public void start() throws Exception{
-        PipelineProfile rv =  new PipelineProfile(nStart(mHandle));
-        rv.close();//TODO: enable when PipelineProfile is implemented
+    public PipelineProfile start() throws Exception{
+        return new PipelineProfile(nStart(mHandle));
     }
 
-    public void start(Config config) throws Exception {
+    public PipelineProfile start(Config config) throws Exception {
         long h = nStartWithConfig(mHandle, config.getHandle());
-        PipelineProfile rv = new PipelineProfile(h);
-        rv.close();//TODO: enable when PipelineProfile is implemented
+        return new PipelineProfile(h);
     }
     public void stop() {
         nStop(mHandle);
     }
 
     public FrameSet waitForFrames() throws Exception {
-        return waitForFrames(5000);
+        return waitForFrames(5000); //defining default timeout
     }
 
     public FrameSet waitForFrames (int timeoutMilliseconds) throws Exception{

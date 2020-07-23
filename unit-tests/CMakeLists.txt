@@ -8,6 +8,20 @@ find_package(Threads REQUIRED)
 
 set(DEPENDENCIES realsense2)
 
+find_package (Python3 COMPONENTS Interpreter Development)
+if(Python3_FOUND)
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/unit-test-config.py ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        RESULT_VARIABLE rv
+    )
+    if( NOT ${rv} EQUAL 0 )
+        message(FATAL_ERROR "unit-test-config has failed with status = ${rv}")
+    endif()
+    add_subdirectory( ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_BINARY_DIR}/build )
+else()
+    message(WARNING "Python 3 was not found; Unit tests will be limited!")
+endif()
+
 set (unit_tests_sources
     unit-tests-live.cpp
     unit-tests-post-processing.cpp
@@ -15,6 +29,8 @@ set (unit_tests_sources
     unit-tests-main.cpp
     unit-tests-common.h
     unit-tests-post-processing-from-bag.cpp
+    catch.h
+    approx.h
 )
 
 add_executable(live-test ${unit_tests_sources})
@@ -122,14 +138,17 @@ endfunction()
 
 function(is_file_empty empty filename)
     set (data "")
-    if(EXISTS ${filename})
-        file(STRINGS  ${filename} data)
-    endif()
-    string(LENGTH "${data}" data_length)
-    #message(STATUS "Read ${data_length}  bytes from  ${filename}")
     set(res TRUE)
-    if (NOT ${data_length} STREQUAL "0")
-        set(res FALSE)
+    if(EXISTS ${filename})
+    	# Travis has CMake 3.5.1... no SIZE support!
+        #file(SIZE ${filename} data_length)
+        file(READ ${filename} data LIMIT 2 HEX)
+        string(LENGTH "${data}" data_length)
+        if (NOT ${data_length} STREQUAL "0")
+            set(res FALSE)
+	#else()
+        #    message(STATUS "${data_length}  bytes from  ${filename}")
+        endif()
     endif()
     set(empty ${res} PARENT_SCOPE)
 endfunction()
@@ -171,12 +190,13 @@ foreach(i ${PP_Tests_List})
   endforeach(ext)
 endforeach(i)
 
-list(APPEND PP_Rosbag_Recordings_List  
+list(APPEND PP_Rosbag_Recordings_List
     [aligned_2c]_all_combinations_depth_color.bag
     [aligned_2d]_all_combinations_depth_color.bag
     all_combinations_depth_color.bag
     [pointcloud]_all_combinations_depth_color.bag
     single_depth_color_640x480.bag
+    D435i_Depth_and_IMU.bag
 )
  set(PP_Rosbag_Recordings_URL http://realsense-hw-public.s3.amazonaws.com/rs-tests/Rosbag_unit_test_records/)
 foreach(i ${PP_Rosbag_Recordings_List})
@@ -192,3 +212,6 @@ endforeach(i)
 if(NOT ${BUILD_SHARED_LIBS} AND ${BUILD_INTERNAL_UNIT_TESTS})
     add_subdirectory(internal)
 endif()
+
+include(algo/CMakeLists.txt)
+

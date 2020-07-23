@@ -13,15 +13,22 @@ import android.util.Pair;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.RadioButton;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import com.intel.realsense.librealsense.Config;
+import com.intel.realsense.librealsense.Device;
+import com.intel.realsense.librealsense.DeviceList;
 import com.intel.realsense.librealsense.FrameSet;
 import com.intel.realsense.librealsense.GLRsSurfaceView;
+import com.intel.realsense.librealsense.Option;
+import com.intel.realsense.librealsense.RsContext;
+import com.intel.realsense.librealsense.Sensor;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class PreviewActivity extends AppCompatActivity {
@@ -33,12 +40,16 @@ public class PreviewActivity extends AppCompatActivity {
     private TextView mSettingsButton;
     private TextView mStatisticsButton;
     private TextView m3dButton;
+    private TextView mControlsButton;
 
     private TextView mStatsView;
     private Map<Integer, TextView> mLabels;
 
     private Streamer mStreamer;
     private StreamingStats mStreamingStats;
+
+    private FwLogsThread mFwLogsThread;
+    private boolean mFwLogsRunning = false;
 
     private boolean statsToggle = false;
     private boolean mShow3D = false;
@@ -70,6 +81,7 @@ public class PreviewActivity extends AppCompatActivity {
         mSettingsButton = findViewById(R.id.preview_settings_button);
         mStatisticsButton = findViewById(R.id.preview_stats_button);
         m3dButton = findViewById(R.id.preview_3d_button);
+        mControlsButton = findViewById(R.id.controls_button);
 
         mStartRecordFab.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -108,6 +120,14 @@ public class PreviewActivity extends AppCompatActivity {
                 editor.commit();
             }
         });
+        mControlsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ControlsDialog cd = new ControlsDialog();
+                cd.setCancelable(true);
+                cd.show(getFragmentManager(), null);
+            }
+        });
         mStatisticsButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -117,6 +137,12 @@ public class PreviewActivity extends AppCompatActivity {
         SharedPreferences sharedPref = getSharedPreferences(getString(R.string.app_settings), Context.MODE_PRIVATE);
         mShow3D = sharedPref.getBoolean(getString(R.string.show_3d), false);
         m3dButton.setTextColor(mShow3D ? Color.YELLOW : Color.WHITE);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        mGLSurfaceView.close();
     }
 
     private synchronized Map<Integer, TextView> createLabels(Map<Integer, Pair<String, Rect>> rects){
@@ -186,7 +212,7 @@ public class PreviewActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onFrameset(FrameSet frameSet) {
+            public void onFrameset(final FrameSet frameSet) {
                 mStreamingStats.onFrameset(frameSet);
                 if(statsToggle){
                     clearLables();
@@ -218,6 +244,8 @@ public class PreviewActivity extends AppCompatActivity {
             Intent intent = new Intent(PreviewActivity.this, SettingsActivity.class);
             startActivity(intent);
         }
+
+        resumeBackgroundTasks();
     }
 
     @Override
@@ -229,5 +257,107 @@ public class PreviewActivity extends AppCompatActivity {
             mStreamer.stop();
         if(mGLSurfaceView != null)
             mGLSurfaceView.clear();
+
+        pauseBackgroundTasks();
+    }
+
+    public void onRadioButtonClicked(View view) {
+        // TODO - Ariel - Move touch logic into controls fragment. Only Sensor's logic should stay here.
+        // TODO - Ariel - Add more controls
+        boolean checked = ((RadioButton) view).isChecked();
+
+        if(!checked)
+            return;
+        RsContext ctx = new RsContext();
+        try(DeviceList devices = ctx.queryDevices()) {
+            try(Device device = devices.createDevice(0)){
+                if(device == null)
+                    return;
+                List<Sensor> sensors = device.querySensors();
+                for(Sensor s : sensors){
+                    if(s.supports(Option.EMITTER_ENABLED)) {
+                        switch(view.getId()) {
+                            case R.id.radio_no_projector:{
+                                setOption(s, Option.EMITTER_ENABLED, 0);
+                                break;
+                            }
+                            case R.id.radio_laser:{
+                                setOption(s, Option.EMITTER_ENABLED, 1);
+                                break;
+                            }
+                            case R.id.radio_laser_auto:{
+                                setOption(s, Option.EMITTER_ENABLED, 2);
+                                break;
+                            }
+                            case R.id.radio_led:{
+                                setOption(s, Option.EMITTER_ENABLED, 3);
+                                break;
+                            }
+                        }
+                    }
+                    if(s.supports(Option.HARDWARE_PRESET)) {
+                        switch(view.getId()) {
+                            case R.id.radio_custom:{
+                                setOption(s, Option.HARDWARE_PRESET, 0);
+                                break;
+                            }
+                            case R.id.radio_burst:{
+                                setOption(s, Option.HARDWARE_PRESET, 2);
+                                break;
+                            }
+                        }
+                    }
+
+                }
+            } catch(Exception e){
+                Log.e(TAG, "Failed to set controls: " + e.getMessage());
+                Toast.makeText(this, "Failed to set controls", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void setOption(Sensor s, Option option, int val) {
+        if(s.supports(option))
+            s.setValue(option, val);
+        else
+            Toast.makeText(this, "This control is not supported by this device", Toast.LENGTH_LONG).show();
+    }
+
+    private synchronized void resumeBackgroundTasks() {
+        resumeFwLogger();
+    }
+
+    private synchronized void pauseBackgroundTasks() {
+        pauseFwLogger();
+    }
+
+    private synchronized void resumeFwLogger() {
+        if (!mFwLogsRunning)
+        {
+            SharedPreferences sharedPref = getSharedPreferences(getString(R.string.app_settings), Context.MODE_PRIVATE);
+            boolean fw_logging_enabled = sharedPref.getBoolean(getString(R.string.fw_logging), false);
+            String fw_logging_file_path = sharedPref.getString(getString(R.string.fw_logging_file_path), "");
+
+            if (fw_logging_enabled) {
+                mFwLogsThread = new FwLogsThread();
+                if(!fw_logging_file_path.equals("")){
+                    mFwLogsThread.init(fw_logging_file_path);
+                }
+                mFwLogsThread.start();
+                mFwLogsRunning = true;
+            }
+        }
+    }
+
+    private synchronized void pauseFwLogger(){
+        SharedPreferences sharedPref = getSharedPreferences(getString(R.string.app_settings), Context.MODE_PRIVATE);
+        boolean fw_logging_enabled = sharedPref.getBoolean(getString(R.string.fw_logging), false);
+        if (fw_logging_enabled) {
+            mFwLogsThread.stopLogging();
+        }
+        if(mFwLogsThread != null && mFwLogsThread.isAlive()) {
+            mFwLogsThread.interrupt();
+        }
+        mFwLogsRunning = false;
     }
 }

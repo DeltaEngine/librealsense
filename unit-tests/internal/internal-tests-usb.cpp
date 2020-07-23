@@ -1,7 +1,7 @@
 // License: Apache 2.0. See LICENSE file in root directory.
 // Copyright(c) 2015 Intel Corporation. All Rights Reserved.
 
-#include "catch/catch.hpp"
+#include "catch.h"
 #include "usb/usb-enumerator.h"
 #include "usb/usb-device.h"
 #include "hw-monitor.h"
@@ -143,9 +143,12 @@ TEST_CASE("query_controls", "[live][usb]")
         auto dev = usb_enumerator::create_usb_device(info);
         if (!dev)
             continue;
-        auto m = dev->open();
+        if (0 != info.mi)        // Lookup for controls interface only
+            continue;
+        auto m = dev->open(info.mi);
 
         std::vector<rs_usb_interface> interfaces = dev->get_interfaces();
+        REQUIRE(interfaces.size() > 0);
 
         //uvc units, rs uvc api is not implemented yet so we use hard coded mapping for reading the PUs
         std::map<int,int> processing_units =
