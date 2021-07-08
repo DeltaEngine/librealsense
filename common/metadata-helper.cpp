@@ -53,7 +53,7 @@ namespace rs2
     public:
         static bool parse_device_id(const std::string& id, device_id* res)
         {
-            static const std::regex regex("pid_([0-9a-f]+)&mi_([0-9]+)#[0-9]&([0-9a-f]+)&[\\s\\S]*\\{([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\}", std::regex_constants::icase);
+            static const std::regex regex("pid_([0-9a-f]+)&mi_([0-9]+)#[0-9a-f]&([0-9a-f]+)&[\\s\\S]*\\{([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\}", std::regex_constants::icase);
 
             std::match_results<std::string::const_iterator> match;
 
@@ -159,7 +159,9 @@ namespace rs2
             if (mi == "00")
             {
                 // L500 has 3 media-pins
-                if (equal(pid, "0b0d") || equal(pid, "0b3d") || equal(pid, "0b64")) return 3;
+                if (equal(pid, "0b0d") || equal(pid, "0b3d") || equal(pid, "0b64") || equal(pid, "0b68")) return 3;
+                // D405 has 3 media-pins
+                else if (equal(pid, "0b5b")) return 3;
                 else return 2; // D400 has two
             }
             return 1; // RGB has one

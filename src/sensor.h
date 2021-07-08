@@ -13,7 +13,7 @@
 #include <limits.h>
 #include <atomic>
 #include <functional>
-#include <core/debug.h>
+#include "core/debug.h"
 
 #include "archive.h"
 #include "core/streaming.h"
@@ -88,6 +88,8 @@ namespace librealsense
     protected:
         void raise_on_before_streaming_changes(bool streaming);
         void set_active_streams(const stream_profiles& requests);
+
+        void register_profile(std::shared_ptr<stream_profile_interface> target) const;
 
         void assign_stream(const std::shared_ptr<stream_interface>& stream,
                            std::shared_ptr<stream_profile_interface> target) const;
@@ -197,8 +199,10 @@ namespace librealsense
         ~synthetic_sensor() override;
 
         virtual void register_option(rs2_option id, std::shared_ptr<option> option);
+        virtual bool try_register_option(rs2_option id, std::shared_ptr<option> option);
         void unregister_option(rs2_option id);
         void register_pu(rs2_option id);
+        bool try_register_pu(rs2_option id);
 
         virtual stream_profiles init_stream_profiles() override;
 
@@ -206,6 +210,8 @@ namespace librealsense
         void close() override;
         void start(frame_callback_ptr callback) override;
         void stop() override;
+
+        virtual float get_preset_max_value() const;
 
         void register_processing_block(const std::vector<stream_profile>& from,
             const std::vector<stream_profile>& to,
@@ -331,7 +337,6 @@ namespace librealsense
         void stop() override;
         void register_xu(platform::extension_unit xu);
         void register_pu(rs2_option id);
-        void try_register_pu(rs2_option id);
 
         std::vector<platform::stream_profile> get_configuration() const { return _internal_config; }
         std::shared_ptr<platform::uvc_device> get_uvc_device() { return _device; }

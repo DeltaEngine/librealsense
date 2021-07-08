@@ -122,7 +122,7 @@ namespace librealsense
 
             if (new_frame)
             {
-                if (max_frames) 
+                if (max_frames)
                     new_frame->mark_fixed();
             }
             else
@@ -221,7 +221,7 @@ namespace librealsense
         {
             if (pending_frames > 0)
             {
-                LOG_INFO("All frames from stream 0x"
+                LOG_DEBUG("All frames from stream 0x"
                     << std::hex << this << " are now released by the user" << std::dec);
             }
         }

@@ -20,11 +20,12 @@ namespace librealsense
 
         pipeline::~pipeline()
         {
-            try
-            {
-                unsafe_stop();
+            if (_active_profile) {
+                try {
+                    unsafe_stop();
+                }
+                catch (...) {}
             }
-            catch (...) {}
         }
 
         std::shared_ptr<profile> pipeline::start(std::shared_ptr<config> conf, frame_callback_ptr callback)
@@ -81,7 +82,8 @@ namespace librealsense
             }
 
             assert(profile);
-            assert(profile->_multistream.get_profiles().size() > 0);
+            if (!profile->_multistream.get_profiles().size())
+                throw librealsense::wrong_api_call_sequence_exception("No streams are selected!");
 
             auto synced_streams_ids = on_start(profile);
 
@@ -131,6 +133,7 @@ namespace librealsense
             {
                 try
                 {
+                    _syncer->stop();
                     _aggregator->stop();
                     auto dev = _active_profile->get_device();
                     if (auto playback = As<librealsense::playback_device>(dev))
@@ -144,10 +147,13 @@ namespace librealsense
                 catch (...)
                 {
                 } // Stop will throw if device was disconnected. TODO - refactoring anticipated
+
+                // shared pointers initialized when pipeline running with _active_profile
+                // should be reset with _active_profile too
+                _active_profile.reset();
+                _prev_conf.reset();
+                _streams_callback.reset();
             }
-            _active_profile.reset();
-            _prev_conf.reset();
-            _streams_callback.reset();
         }
 
         std::shared_ptr<device_interface> pipeline::wait_for_device(const std::chrono::milliseconds& timeout, const std::string& serial)

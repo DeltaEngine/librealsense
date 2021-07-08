@@ -2,14 +2,16 @@
 // Copyright(c) 2017 Intel Corporation. All Rights Reserved.
 #include <glad/glad.h>
 
-#include "fw-update-helper.h"
 
 #include <map>
 #include <vector>
 #include <string>
 #include <thread>
 #include <condition_variable>
-#include <model-views.h>
+
+#include "fw-update-helper.h"
+#include "model-views.h"
+#include "viewer.h"
 
 #include "os.h"
 
@@ -27,7 +29,7 @@ const char* fw_get_L5XX_FW_Image(int) { return NULL; }
 
 #endif // INTERNAL_FW
 
-constexpr const char* recommended_fw_url = "https://dev.intelrealsense.com/docs/firmware-releases";
+constexpr const char* recommended_fw_url = "https://dev.intelrealsense.com/docs/firmware-updates";
 
 namespace rs2
 {
@@ -180,7 +182,21 @@ namespace rs2
         else
             serial = _dev.query_sensors().front().get_info(RS2_CAMERA_INFO_FIRMWARE_UPDATE_ID);
 
-        _model.related_notifications.clear();
+        // Clear FW update related notification to avoid dismissing the notification on ~device_model()
+        // We want the notification alive during the whole process.
+        _model.related_notifications.erase(
+            std::remove_if( _model.related_notifications.begin(),
+                            _model.related_notifications.end(),
+                            []( std::shared_ptr< notification_model > n ) {
+                                return n->is< fw_update_notification_model >();
+                            } ) , end(_model.related_notifications));
+
+        for (auto&& n : _model.related_notifications)
+        {
+            if (n->is< fw_update_notification_model >()
+                || n->is< sw_recommended_update_alert_model >())
+                n->dismiss(false);
+        }
 
         _progress = 5;
 
@@ -190,30 +206,68 @@ namespace rs2
 
         if (auto upd = _dev.as<updatable>())
         {
+            // checking firmware version compatibility with device
+            if (_is_signed)
+            {
+                if (!upd.check_firmware_compatibility(_fw))
+                {
+                    std::stringstream ss;
+                    ss << "The firmware version is not compatible with ";
+                    ss << _dev.get_info(RS2_CAMERA_INFO_NAME) << std::endl;
+                    fail(ss.str());
+                    return;
+                }
+            }
             log("Backing-up camera flash memory");
 
-            auto flash = upd.create_flash_backup([&](const float progress)
+            std::string log_backup_status;
+            try
             {
-                _progress = int((ceil(progress * 5) / 5) * (30 - next_progress)) + next_progress;
-            });
+                auto flash = upd.create_flash_backup([&](const float progress)
+                {
+                    _progress = int((ceil(progress * 5) / 5) * (30 - next_progress)) + next_progress;
+                });
 
-            auto temp = get_folder_path(special_folder::app_data);
-            temp += serial + "." + get_timestamped_file_name() + ".bin";
+                auto temp = get_folder_path(special_folder::app_data);
+                temp += serial + "." + get_timestamped_file_name() + ".bin";
 
+                {
+                    std::ofstream file(temp.c_str(), std::ios::binary);
+                    file.write((const char*)flash.data(), flash.size());
+                    log_backup_status = "Backup completed and saved as '"  + temp + "'";
+                }
+            }
+            catch (const std::exception& e)
             {
-                std::ofstream file(temp.c_str(), std::ios::binary);
-                file.write((const char*)flash.data(), flash.size());
+                if (auto not_model_protected = get_protected_notification_model())
+                {
+                    log_backup_status = "WARNING: backup failed; continuing without it...";
+                    not_model_protected->output.add_log(RS2_LOG_SEVERITY_WARN,
+                        __FILE__,
+                        __LINE__,
+                        log_backup_status + ", Error: " + e.what());
+                }
+            }
+            catch ( ... )
+            {
+                if (auto not_model_protected = get_protected_notification_model())
+                {
+                    log_backup_status = "WARNING: backup failed; continuing without it...";
+                    not_model_protected->add_log(log_backup_status + ", Unknown error occurred");
+                }
             }
 
-            std::string log_line = "Backup completed and saved as '";
-            log_line += temp + "'";
-            log(log_line);
+            log(log_backup_status);
 
             next_progress = 40;
 
             if (_is_signed)
             {
                 log("Requesting to switch to recovery mode");
+
+                // in order to update device to DFU state, it will be disconnected then switches to DFU state
+                // if querying devices is called while device still switching to DFU state, an exception will be thrown
+                // to prevent that, a blocking is added to make sure device is updated before continue to next step of querying device
                 upd.enter_update_state();
 
                 if (!check_for([this, serial, &dfu]() {
@@ -237,9 +291,13 @@ namespace rs2
                             }
                         }
                         catch (std::exception &e) {
-                            std::stringstream s;
-                            s << "Exception caught in FW Update process-flow: " << e.what();
-                            log(s.str().c_str());
+                            if (auto not_model_protected = get_protected_notification_model())
+                            {
+                                not_model_protected->output.add_log(RS2_LOG_SEVERITY_WARN,
+                                    __FILE__,
+                                    __LINE__,
+                                    to_string() << "Exception caught in FW Update process-flow: " << e.what() << "; Retrying...");
+                            }
                         }
                         catch (...) {}
                     }
@@ -379,12 +437,33 @@ namespace rs2
 
                 if (ImGui::Button(button_name.c_str(), { float(bar_width), 20.f }) || update_manager->started())
                 {
+                    // stopping stream before starting fw update
+                    auto fw_update_manager = dynamic_cast<firmware_update_manager*>(update_manager.get());
+                    std::for_each(fw_update_manager->get_device_model().subdevices.begin(),
+                        fw_update_manager->get_device_model().subdevices.end(),
+                        [&](const std::shared_ptr<subdevice_model>& sm)
+                        {
+                            if (sm->streaming)
+                            {
+                                try
+                                {
+                                    sm->stop(fw_update_manager->get_protected_notification_model());
+                                }
+                                catch (...) 
+                                { 
+                                    // avoiding exception that can be sent by stop method
+                                    // this could happen if the sensor is not streaming and the stop method is called - for example 
+                                }
+                            }   
+                        });
+
                     auto _this = shared_from_this();
                     auto invoke = [_this](std::function<void()> action) {
                         _this->invoke(action);
                     };
-                    
-                    if (!update_manager->started()) update_manager->start(invoke);
+
+                    if (!update_manager->started()) 
+                        update_manager->start(invoke);
 
                     update_state = RS2_FWU_STATE_IN_PROGRESS;
                     enable_dismiss = false;
@@ -557,7 +636,7 @@ namespace rs2
         message = name;
         this->severity = RS2_LOG_SEVERITY_INFO;
         this->category = RS2_NOTIFICATION_CATEGORY_FIRMWARE_UPDATE_RECOMMENDED;
-
         pinned = true;
+        forced = true;
     }
 }

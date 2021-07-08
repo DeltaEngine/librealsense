@@ -6,9 +6,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.appcompat.app.AppCompatActivity;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -24,8 +24,6 @@ import com.intel.realsense.librealsense.FwLogger;
 import com.intel.realsense.librealsense.ProductLine;
 import com.intel.realsense.librealsense.RsContext;
 
-import java.io.File;
-import java.security.Permission;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -53,6 +51,45 @@ public class DetachedActivity extends AppCompatActivity {
 
         requestPermissionsIfNeeded();
 
+        init();
+    }
+
+    private void requestPermissionsIfNeeded() {
+        ArrayList<String> permissions = new ArrayList<>();
+        if (!isCameraPermissionGranted()) {
+            permissions.add(Manifest.permission.CAMERA);
+        }
+
+        if (!isWritePermissionGranted()) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+        }
+        if (!permissions.isEmpty())
+            ActivityCompat.requestPermissions(this, permissions.toArray(new String[permissions.size()]), PermissionsUtils.PERMISSIONS_REQUEST_ALL);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+
+        if (isCameraPermissionGranted()) {
+            RsContext.init(getApplicationContext());
+            mRsContext.setDevicesChangedCallback(mListener);
+            validatedDevice();
+        }
+    }
+
+    private boolean isCameraPermissionGranted() {
+        if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.O)
+            return true;
+        return  ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean isWritePermissionGranted() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private synchronized void init()
+    {
         mPlaybackButton = findViewById(R.id.playbackButton);
         mPlaybackButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -77,44 +114,27 @@ public class DetachedActivity extends AppCompatActivity {
         mMinimalFirmwares.put(ProductLine.D400, MINIMAL_D400_FW_VERSION);
     }
 
-    private void requestPermissionsIfNeeded() {
-        ArrayList<String> permissions = new ArrayList<>();
-        if (!isCameraPermissionGranted()) {
-            permissions.add(Manifest.permission.CAMERA);
-        }
-
-        if (!isWritePermissionGranted()) {
-            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
-        }
-        if (!permissions.isEmpty())
-            ActivityCompat.requestPermissions(this, permissions.toArray(new String[permissions.size()]), PermissionsUtils.PERMISSIONS_REQUEST_ALL);
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        mDetached = true;
-        if (isCameraPermissionGranted()) {
-            RsContext.init(getApplicationContext());
-            mRsContext.setDevicesChangedCallback(mListener);
-            validatedDevice();
-        }
-    }
-
-    private boolean isCameraPermissionGranted() {
-        return android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.O && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    private boolean isWritePermissionGranted() {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
-    }
-
     private synchronized void validatedDevice(){
         if(mUpdating)
             return;
         try(DeviceList dl = mRsContext.queryDevices()){
-            if(dl.getDeviceCount() == 0)
+            if(dl.getDeviceCount() == 0) {
+                init();
+
+                // kill preview activity if device disconnected
+                if (mDetached) {
+                    mDetached = false;
+
+                    Intent intent = new Intent(this, PreviewActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    intent.putExtra("keepalive", false);
+                    startActivity(intent);
+                }
+
                 return;
+            }
+
             try(Device d = dl.createDevice(0)){
                 if(d == null)
                     return;
@@ -127,10 +147,17 @@ public class DetachedActivity extends AppCompatActivity {
                 else {
                     if (!validateFwVersion(d))
                         return;
+
                     mDetached = false;
 
-                    finish();
+
+                    // launch preview activity and keep it alive
+                    // the activity is single top instance, can be killed later the same instance
+                    // to prevent issues with multiple instances
                     Intent intent = new Intent(this, PreviewActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    intent.putExtra("keepalive", true);
                     startActivity(intent);
                 }
             }
@@ -201,11 +228,8 @@ public class DetachedActivity extends AppCompatActivity {
 
         @Override
         public void onDeviceDetach() {
-            if(mDetached)
-                return;
-            finish();
-            Intent intent = new Intent(mAppContext, DetachedActivity.class);
-            startActivity(intent);
+            mDetached = true;
+            validatedDevice();
         }
     };
 }

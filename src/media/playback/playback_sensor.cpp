@@ -45,10 +45,10 @@ bool playback_sensor::streams_contains_one_frame_or_more()
 {
     for (auto&& d : m_dispatchers)
     {
-        if (d.second->empty())
-            return false;
+        if (!d.second->empty())
+            return true;
     }
-    return true;
+    return false;
 }
 
 stream_profiles playback_sensor::get_stream_profiles(int tag) const
@@ -71,7 +71,7 @@ void playback_sensor::open(const stream_profiles& requests)
     //Playback can only play the streams that were recorded.
     //Go over the requested profiles and see if they are available
     LOG_DEBUG("Open Sensor " << m_sensor_id);
-
+    std::lock_guard<std::mutex> l(m_mutex);
     for (auto&& r : requests)
     {
         if (std::find_if(std::begin(m_available_profiles),
@@ -85,8 +85,16 @@ void playback_sensor::open(const stream_profiles& requests)
     //For each stream, create a dedicated dispatching thread
     for (auto&& profile : requests)
     {
-        m_dispatchers.emplace(std::make_pair(profile->get_unique_id(), std::make_shared<dispatcher>(_default_queue_size)));
+        auto on_drop_callback = [profile]( dispatcher::action act ) {
+            LOG_DEBUG( "Dropping frame from dispatcher " << profile_to_string( profile ) );
+        };
+
+        m_dispatchers.emplace( std::make_pair(
+            profile->get_unique_id(),
+            std::make_shared< dispatcher >( _default_queue_size, on_drop_callback ) ) );
+
         m_dispatchers[profile->get_unique_id()]->start();
+
         device_serializer::stream_identifier f{ get_device_index(), m_sensor_id, profile->get_stream_type(), static_cast<uint32_t>(profile->get_stream_index()) };
         opened_streams.push_back(f);
     }
@@ -97,6 +105,7 @@ void playback_sensor::open(const stream_profiles& requests)
 void playback_sensor::close()
 {
     LOG_DEBUG("Close sensor " << m_sensor_id);
+    std::lock_guard<std::mutex> l(m_mutex);
     std::vector<device_serializer::stream_identifier> closed_streams;
     for (auto&& dispatcher : m_dispatchers)
     {
@@ -155,7 +164,14 @@ void playback_sensor::stop(bool invoke_required)
 }
 void playback_sensor::stop()
 {
-    stop(true);
+    // This stop is "from the user" -- as opposed to a stop that's called when we reach EOF, from
+    // playback_device::do_loop, which calls stop(false) directly.
+    // 
+    // If we send stop(true), the stop will be placed on the device's dispatcher but only after
+    // setting m_is_started to false and stopping our own dispatchers. Each sensor will place its
+    // own stop dispatch, and the whole thing is a mess...
+    //
+    stop( false );
 }
 
 bool playback_sensor::is_streaming() const

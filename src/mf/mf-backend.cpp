@@ -24,7 +24,15 @@ namespace librealsense
     {
         wmf_backend::wmf_backend()
         {
+            // In applications that have COM initializations on other threads using
+            // COINIT_APARTMENTTHREADED (like the Qt framework, for example), using
+            // COINIT_MULTITHREADED can lead to a deadlock inside COM functions.
+#ifdef COM_MULTITHREADED
             CoInitializeEx(nullptr, COINIT_MULTITHREADED); // when using COINIT_APARTMENTTHREADED, calling _pISensor->SetEventSink(NULL) to stop sensor can take several seconds
+#else
+            CoInitializeEx( nullptr, COINIT_APARTMENTTHREADED ); // Apartment model
+#endif
+
             MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
         }
 
@@ -87,7 +95,10 @@ namespace librealsense
             return device_infos;
         }
 
-        wmf_hid_device::wmf_hid_device(const hid_device_info& info)
+        wmf_hid_device::wmf_hid_device(const hid_device_info& info,
+                                       std::shared_ptr<const wmf_backend> backend)
+            : _backend(std::move(backend)),
+              _cb(nullptr)
         {
             bool found = false;
 
@@ -107,7 +118,7 @@ namespace librealsense
 
         std::shared_ptr<hid_device> wmf_backend::create_hid_device(hid_device_info info) const
         {
-            return std::make_shared<wmf_hid_device>(info);
+            return std::make_shared<wmf_hid_device>(info, shared_from_this());
         }
 
         std::vector<hid_device_info> wmf_backend::query_hid_devices() const

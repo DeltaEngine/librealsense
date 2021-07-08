@@ -56,12 +56,12 @@ classdef pipeline < handle
             frames = realsense.frameset(out);
         end
         function [res, frames] = poll_for_frames(this)
-            res, out = realsense.librealsense_mex('rs2::pipeline', 'poll_for_frames', this.objectHandle);
+            [res, out] = realsense.librealsense_mex('rs2::pipeline', 'poll_for_frames', this.objectHandle);
             frames = realsense.frameset(out);
         end
         function profile = get_active_profile(this)
             out = realsense.librealsense_mex('rs2::pipeline', 'get_active_profile', this.objectHandle);
-            realsense.pipeline_profile(out);
+            profile = realsense.pipeline_profile(out);
         end
     end
 end

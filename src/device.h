@@ -78,6 +78,10 @@ namespace librealsense
 
         virtual bool contradicts(const stream_profile_interface* a, const std::vector<stream_profile>& others) const override;
 
+        virtual void stop_activity() const;
+
+        bool device_changed_notifications_on() const { return _device_changed_notifications; }
+
     protected:
         int add_sensor(const std::shared_ptr<sensor_interface>& sensor_base);
         int assign_sensor(const std::shared_ptr<sensor_interface>& sensor_base, uint8_t idx);
@@ -86,7 +90,7 @@ namespace librealsense
 
         explicit device(std::shared_ptr<context> ctx,
                         const platform::backend_device_group group,
-                        bool device_changed_notifications = false);
+                        bool device_changed_notifications = true);
 
         std::map<int, std::pair<uint32_t, std::shared_ptr<const stream_interface>>> _extrinsics;
 

@@ -10,12 +10,14 @@ find_package(Threads REQUIRED)
 
 include_directories(${CMAKE_BINARY_DIR})
 
+if(${BUILD_EASYLOGGINGPP})
 set( ELPP_DIR ../../third-party/easyloggingpp/src )
-include_directories( ${ELPP_DIR} )
-set( ELPP_FILES
-    ${ELPP_DIR}/easylogging++.cc
-    ${ELPP_DIR}/easylogging++.h
-)
+    include_directories( ${ELPP_DIR} )
+    set( ELPP_FILES
+        ${ELPP_DIR}/easylogging++.cc
+        ${ELPP_DIR}/easylogging++.h
+    )
+endif()
 
 include(../../common/CMakeLists.txt)
 
@@ -53,6 +55,12 @@ if(BUILD_GRAPHICAL_EXAMPLES)
     ../../common/os.cpp
 )
 
+SET(DELAYED 
+    realsense2d.dll
+    realsense2-gld.dll
+    realsense2.dll
+    realsense2-gl.dll
+)
 
 if(DEFINED OpenCV_DIR  AND  IS_DIRECTORY ${OpenCV_DIR})
 
@@ -62,7 +70,21 @@ if(DEFINED OpenCV_DIR  AND  IS_DIRECTORY ${OpenCV_DIR})
     set(DEPENDENCIES ${deps} ${OpenCV_LIBS})
     include_directories( ../../wrappers/opencv )
 
+    list(APPEND DELAYED
+        opencv_highgui341.dll
+        opencv_core341.dll
+        opencv_imgproc341.dll
+        opencv_dnn341.dll
+        opencv_highgui341d.dll
+        opencv_core341d.dll
+        opencv_imgproc341d.dll
+        opencv_dnn341d.dll
+    )
+
 endif()
+
+include(../../wrappers/openvino/check_vino_version.cmake)
+
 if(DEFINED INTEL_OPENVINO_DIR  AND  IS_DIRECTORY ${INTEL_OPENVINO_DIR})
 
     message( STATUS "Enabling OpenVINO face-detection for realsense-viewer ..." )
@@ -70,12 +92,22 @@ if(DEFINED INTEL_OPENVINO_DIR  AND  IS_DIRECTORY ${INTEL_OPENVINO_DIR})
     include(${INTEL_OPENVINO_DIR}/inference_engine/share/InferenceEngineConfig.cmake)
 
     get_property(deps VARIABLE PROPERTY DEPENDENCIES)
-    set(DEPENDENCIES ${deps} ${InferenceEngine_LIBRARIES} ie_cpu_extension)
+
+    check_vino_version()
+    if(OPENVINO2019)
+        set(DEPENDENCIES ${deps} ${InferenceEngine_LIBRARIES} ie_cpu_extension)
+    else()
+        set(DEPENDENCIES ${deps} ${InferenceEngine_LIBRARIES})
+    endif()
+
     include_directories( ../../wrappers/openvino )
     include_directories( ../../wrappers/opencv )
     include_directories( ${InferenceEngine_INCLUDE_DIRS} )
+
+    if(OPENVINO2019)
     # We need additional access to ext_list.hpp, for CPU extension support:
-    include_directories( ${IE_ROOT_DIR}/src/extension )
+    include_directories( "${IE_ROOT_DIR}/src/extension" )
+    endif()
 
     set(OPENVINO_FILES
         ../../wrappers/openvino/rs-vino/base-detection.cpp
@@ -87,8 +119,11 @@ if(DEFINED INTEL_OPENVINO_DIR  AND  IS_DIRECTORY ${INTEL_OPENVINO_DIR})
         ../../wrappers/openvino/rs-vino/detected-object.cpp
         ../../wrappers/openvino/rs-vino/detected-object.h
         ../../wrappers/openvino/rs-vino/openvino-helpers.h
-        ${IE_ROOT_DIR}/src/extension/ext_list.hpp
         )
+
+    if(OPENVINO2019)
+        set(OPENVINO_FILES ${OPENVINO_FILES} "${IE_ROOT_DIR}/src/extension/ext_list.hpp")
+    endif()
 
     set(RS_VIEWER_CPP
         ${RS_VIEWER_CPP}
@@ -105,6 +140,18 @@ if(DEFINED INTEL_OPENVINO_DIR  AND  IS_DIRECTORY ${INTEL_OPENVINO_DIR})
     dl_vino_model( "age-gender-recognition-retail-0013.bin"  "206f6e97e53cd600fcac7d31e1c56accbbe461b9" )
     dl_vino_model( "age-gender-recognition-retail-0013.xml"  "2654d7f1638d575b8d1886f8128deae2ea79ee55" )
 
+    list(APPEND DELAYED
+        cpu_extension.dll
+        inference_engine.dll
+        libmmd.dll
+        mkl_tiny_tbb.dll
+        MKLDNNPlugin.dll
+        opencv_core412.dll
+        opencv_imgproc412.dll
+        svml_dispmd.dll
+        tbb.dll
+        tbbmalloc.dll
+    )
 endif()
 
 # config-ui
@@ -133,11 +180,20 @@ if(WIN32)
 
     source_group("OpenVINO" FILES ${OPENVINO_FILES})
 
+    #list(TRANSFORM DELAYED PREPEND " /DELAYLOAD:")  - Requires cmake v3.12
+    PREPEND(DELAYED " /DELAYLOAD:" ${DELAYED})
+    string(REPLACE ";" " " LD_FLAGS_STR "${DELAYED}")
+    set_target_properties(realsense-viewer PROPERTIES LINK_FLAGS "${LD_FLAGS_STR}")
+
 else()
     add_executable(realsense-viewer
         ${RS_VIEWER_CPP}
         ${ELPP_FILES}
     )
+endif()
+
+if(OPENVINO2019)
+    target_compile_definitions(realsense-viewer PRIVATE OPENVINO2019)
 endif()
 
 source_group("EasyLogging++" FILES ${ELPP_FILES})
@@ -179,6 +235,7 @@ set_target_properties (realsense-viewer PROPERTIES
     FOLDER Tools
 )
 
+target_include_directories(realsense-viewer PRIVATE ../../src)
 
 install(
     TARGETS

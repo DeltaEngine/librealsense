@@ -16,8 +16,16 @@ set (INTERNAL_TESTS_SOURCES
     ../approx.h
 )
 
+if(UNIX AND NOT ANDROID)
+list(APPEND INTERNAL_TESTS_SOURCES internal-tests-linux.cpp)
+endif()
+
 add_executable(${PROJECT_NAME} ${INTERNAL_TESTS_SOURCES})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 11)
 target_link_libraries(${PROJECT_NAME} ${DEPENDENCIES})
-include_directories(${PROJECT_NAME} ../ ../../src/)
+include_directories(../ ../../src/)
 set_target_properties (${PROJECT_NAME} PROPERTIES FOLDER "Unit-Tests")
+
+if(UNIX)
+    include_directories(${LIBUSB_INC})
+endif()

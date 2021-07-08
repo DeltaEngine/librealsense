@@ -10,14 +10,23 @@ find_package(Threads REQUIRED)
 
 include_directories(${CMAKE_BINARY_DIR})
 
+if(${BUILD_EASYLOGGINGPP})
 set( ELPP_DIR ../../third-party/easyloggingpp/src )
 
 include_directories( ${ELPP_DIR} )
 set( ELPP_FILES
     ${ELPP_DIR}/easylogging++.cc
     ${ELPP_DIR}/easylogging++.h)
-    
+endif()
+
 include(../../common/CMakeLists.txt)
+
+SET(DELAYED 
+    realsense2d.dll
+    realsense2-gld.dll
+    realsense2.dll
+    realsense2-gl.dll
+)
 
 if(BUILD_GRAPHICAL_EXAMPLES)
     set(RS_QUALITY_TOOL_CPP
@@ -64,12 +73,18 @@ if(BUILD_GRAPHICAL_EXAMPLES)
             depth-metrics.h
             ${COMMON_SRC})
 
-        include_directories(rs-depth-quality ../../common  ../../third-party
-                                             ../../third-party/imgui
-                                             ../../third-party/glad
-                                             ../../third-party/tclap/include
-                                             ../../third-party/tinyfiledialogs
-                                             ${CMAKE_CURRENT_SOURCE_DIR}/res/)
+        include_directories(../../common  ../../third-party
+                            ../../third-party/imgui
+                            ../../third-party/glad
+                            ../../third-party/tclap/include
+                            ../../third-party/tinyfiledialogs
+                            ${CMAKE_CURRENT_SOURCE_DIR}/res/)
+
+        #list(TRANSFORM DELAYED PREPEND " /DELAYLOAD:")
+        PREPEND(DELAYED " /DELAYLOAD:" ${DELAYED})
+        #infoValue(DELAYED)
+        string(REPLACE ";" " " LD_FLAGS_STR "${DELAYED}")
+        set_target_properties(rs-depth-quality PROPERTIES LINK_FLAGS "${LD_FLAGS_STR}")
 
     else()
         add_executable(rs-depth-quality 
@@ -77,11 +92,11 @@ if(BUILD_GRAPHICAL_EXAMPLES)
         ${ELPP_FILES}
         )
 
-        include_directories(rs-depth-quality ../../common  ../../third-party
-                                             ../../third-party/imgui
-                                             ../../third-party/glad
-                                             ../../third-party/tinyfiledialogs
-                                             ../../third-party/tclap/include)
+        include_directories(../../common  ../../third-party
+                            ../../third-party/imgui
+                            ../../third-party/glad
+                            ../../third-party/tinyfiledialogs
+                            ../../third-party/tclap/include)
     endif()
 
     source_group("EasyLogging++" FILES ${ELPP_FILES})
@@ -109,6 +124,8 @@ if(BUILD_GRAPHICAL_EXAMPLES)
     set_target_properties (rs-depth-quality PROPERTIES
         FOLDER Tools
     )
+
+    target_include_directories(rs-depth-quality PRIVATE ../../src)
 
     install(
         TARGETS

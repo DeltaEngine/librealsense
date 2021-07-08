@@ -3,9 +3,9 @@
 #pragma once
 
 #include <map>
-#include "../include/librealsense2/h/rs_option.h"
+#include <librealsense2/h/rs_option.h>
 #include "extension.h"
-#include "types.h"
+#include "../types.h"
 
 namespace librealsense
 {
@@ -70,6 +70,17 @@ namespace librealsense
                     << get_option_name(id) << "!");
             }
             return *it->second;
+        }
+
+        std::shared_ptr<option> get_option_handler(rs2_option id)
+        {
+            return (const_cast<const options_container*>(this)->get_option_handler(id));
+        }
+
+        std::shared_ptr<option> get_option_handler(rs2_option id) const
+        {
+            auto it = _options.find(id);
+            return (it == _options.end() ? std::shared_ptr<option>(nullptr) : it->second);
         }
 
         void register_option(rs2_option id, std::shared_ptr<option> option)

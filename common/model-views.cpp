@@ -37,12 +37,13 @@
 
 #include "metadata-helper.h"
 #include "calibration-model.h"
+#include "sw-update/http-downloader.h"
 
 using namespace rs400;
 using namespace nlohmann;
 using namespace rs2::sw_update;
 
-static rs2_sensor_mode resolution_from_width_height(int width, int height)
+ rs2_sensor_mode rs2::resolution_from_width_height(int width, int height)
 {
     if ((width == 240 && height == 320) || (width == 320 && height == 240))
         return RS2_SENSOR_MODE_QVGA;
@@ -52,6 +53,50 @@ static rs2_sensor_mode resolution_from_width_height(int width, int height)
         return RS2_SENSOR_MODE_XGA;
     else
         return RS2_SENSOR_MODE_COUNT;
+}
+
+static void width_height_from_resolution(rs2_sensor_mode mode, int &width, int &height)
+{
+    switch (mode)
+    {
+    case RS2_SENSOR_MODE_VGA:
+        width = 640;
+        height = 480;
+        break;
+    case RS2_SENSOR_MODE_XGA:
+        width = 1024;
+        height = 768;
+        break;
+    case RS2_SENSOR_MODE_QVGA:
+        width = 320;
+        height = 240;
+        break;
+    default:
+        width = height = 0;
+        break;
+    }
+}
+
+static int get_resolution_id_from_sensor_mode( rs2_sensor_mode sensor_mode,
+                                    const rs2::sensor & s,
+                                    const std::vector< std::pair< int, int > > & res_values )
+{
+    int width = 0, height = 0;
+    width_height_from_resolution( sensor_mode, width, height );
+    auto iter = std::find_if( res_values.begin(),
+                              res_values.end(),
+                              [width, height]( std::pair< int, int > res ) {
+                                  if( ( res.first == width ) && ( res.second == height )
+                                      || ( res.first == height ) && ( res.second == width ) )
+                                      return true;
+                                  return false;
+                              } );
+    if( iter != res_values.end() )
+    {
+        return static_cast< int >( std::distance( res_values.begin(), iter ) );
+    }
+
+    throw std::runtime_error( "cannot convert sensor mode to resolution ID" );
 }
 
 ImVec4 flip(const ImVec4& c)
@@ -393,6 +438,73 @@ namespace rs2
         return ret;
     }
 
+    bool motion_data_to_csv( const std::string & filename, rs2::frame frame )
+    {
+        bool ret = false;
+        if( auto motion = frame.as< motion_frame >() )
+        {
+            std::string units;
+            if( motion.get_profile().stream_type() == RS2_STREAM_GYRO )
+                units = "( deg/sec )";
+            else
+                units = "( m/sec^2 )";
+            auto axes = motion.get_motion_data();
+            std::ofstream csv( filename );
+
+            auto profile = frame.get_profile();
+            csv << "Frame Info: " << std::endl << "Type," << profile.stream_name() << std::endl;
+            csv << "Format," << rs2_format_to_string( profile.format() ) << std::endl;
+            csv << "Frame Number," << frame.get_frame_number() << std::endl;
+            csv << "Timestamp (ms)," << std::fixed << std::setprecision( 2 )
+                << frame.get_timestamp() << std::endl;
+            csv << std::setprecision( 7 ) << "Axes" << units << ", " << axes << std::endl;
+
+            ret = true;
+        }
+
+        return ret;
+    }
+
+    bool pose_data_to_csv( const std::string & filename, rs2::frame frame )
+    {
+        bool ret = false;
+        if( auto pose = frame.as< pose_frame >() )
+        {
+            auto pose_data = pose.get_pose_data();
+            std::ofstream csv( filename );
+
+            auto profile = frame.get_profile();
+            csv << "Frame Info: " << std::endl << "Type," << profile.stream_name() << std::endl;
+            csv << "Format," << rs2_format_to_string( profile.format() ) << std::endl;
+            csv << "Frame Number," << frame.get_frame_number() << std::endl;
+            csv << "Timestamp (ms)," << std::fixed << std::setprecision( 2 )
+                << frame.get_timestamp() << std::endl;
+            csv << std::setprecision( 7 ) << "Acceleration( meters/sec^2 ), "
+                << pose_data.acceleration << std::endl;
+            csv << std::setprecision( 7 ) << "Angular_acceleration( radians/sec^2 ), "
+                << pose_data.angular_acceleration << std::endl;
+            csv << std::setprecision( 7 ) << "Angular_velocity( radians/sec ), "
+                << pose_data.angular_velocity << std::endl;
+            csv << std::setprecision( 7 )
+                << "Mapper_confidence( 0x0 - Failed 0x1 - Low 0x2 - Medium 0x3 - High ), "
+                << pose_data.mapper_confidence << std::endl;
+            csv << std::setprecision( 7 )
+                << "Rotation( quaternion rotation (relative to initial position) ), "
+                << pose_data.rotation << std::endl;
+            csv << std::setprecision( 7 )
+                << "Tracker_confidence( 0x0 - Failed 0x1 - Low 0x2 - Medium 0x3 - High ), "
+                << pose_data.tracker_confidence << std::endl;
+            csv << std::setprecision( 7 ) << "Translation( meters ), " << pose_data.translation
+                << std::endl;
+            csv << std::setprecision( 7 ) << "Velocity( meters/sec ), " << pose_data.velocity
+                << std::endl;
+
+            ret = true;
+        }
+
+        return ret;
+    }
+
     std::vector<const char*> get_string_pointers(const std::vector<std::string>& vec)
     {
         std::vector<const char*> res;
@@ -437,6 +549,13 @@ namespace rs2
         }
         return option;
     }
+    std::string adjust_description(const std::string& str_in, const std::string& to_be_replaced, const std::string& to_replace)
+    {
+        std::string adjusted_string(str_in);
+        auto pos = adjusted_string.find(to_be_replaced);
+        adjusted_string.replace(pos, to_be_replaced.size(), to_replace);
+        return adjusted_string;
+    }
 
     bool option_model::draw(std::string& error_message, notifications_model& model, bool new_line, bool use_option_name)
     {
@@ -448,7 +567,26 @@ namespace rs2
             if (opt == RS2_OPTION_HOLES_FILL)
                 use_option_name = false;
 
-            auto desc = endpoint->get_option_description(opt);
+            // lambda function used to convert meters to cm - while the number is a string
+            auto convert_float_str = [](std::string float_str, float conversion_factor) {
+                if (float_str.size() == 0)
+                    return float_str;
+                float number_float = std::stof(float_str);
+                return std::to_string(number_float * conversion_factor);
+            };
+
+            std::string desc_str (endpoint->get_option_description(opt));
+
+            // Device D405 is for short range, therefore, its units are in cm - for better UX
+            bool use_cm_units = false;
+            std::string device_pid = dev->dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+            if (device_pid == "0B5B" && val_in_range(opt, { RS2_OPTION_MIN_DISTANCE, RS2_OPTION_MAX_DISTANCE, RS2_OPTION_DEPTH_UNITS }))
+            {
+                use_cm_units = true;
+                desc_str = adjust_description(desc_str, "meters", "cm");
+            }
+
+            auto desc = desc_str.c_str();
 
             // remain option to append to the current line
             if (!new_line)
@@ -459,18 +597,14 @@ namespace rs2
                 auto bool_value = value > 0.0f;
                 if (ImGui::Checkbox(label.c_str(), &bool_value))
                 {
-                    res = true;
-                    value = bool_value ? 1.0f : 0.0f;
-                    try
+                    if (allow_change((bool_value ? 1.0f : 0.0f), error_message))
                     {
+                        res = true;
                         model.add_log(to_string() << "Setting " << opt << " to "
-                            << value << " (" << (bool_value ? "ON" : "OFF") << ")");
-                        endpoint->set_option(opt, value);
+                            << (bool_value? "1.0" : "0.0") << " (" << (bool_value ? "ON" : "OFF") << ")");
+
+                        set_option(opt, bool_value ? 1.f : 0.f, error_message);
                         *invalidate_flag = true;
-                    }
-                    catch (const error& e)
-                    {
-                        error_message = error_to_string(e);
                     }
                 }
                 if (ImGui::IsItemHovered() && desc)
@@ -567,16 +701,29 @@ namespace rs2
                         }
                         else if (edit_mode)
                         {
+                            std::string buff_str = edit_value;
+
+                            // when cm must be used instead of meters
+                            if (use_cm_units)
+                                buff_str = convert_float_str(buff_str, 100.f);
+
                             char buff[TEXT_BUFF_SIZE];
                             memset(buff, 0, TEXT_BUFF_SIZE);
-                            strcpy(buff, edit_value.c_str());
+                            strcpy(buff, buff_str.c_str());
+
                             if (ImGui::InputText(id.c_str(), buff, TEXT_BUFF_SIZE,
                                 ImGuiInputTextFlags_EnterReturnsTrue))
                             {
-                                float new_value;
-                                if (!string_to_int(buff, new_value))
+                                if (use_cm_units)
                                 {
-                                    error_message = "Invalid numeric input!";
+                                    buff_str = convert_float_str(std::string(buff), 0.01f);
+                                    memset(buff, 0, TEXT_BUFF_SIZE);
+                                    strcpy(buff, buff_str.c_str());
+                                }
+                                float new_value;
+                                if(!utilities::string::string_to_value<float>(buff, new_value))
+                                {
+                                    error_message = "Invalid float input!";
                                 }
                                 else if (new_value < range.min || new_value > range.max)
                                 {
@@ -586,18 +733,15 @@ namespace rs2
                                 }
                                 else
                                 {
-                                    try
-                                    {
-                                        endpoint->set_option(opt, new_value);
-                                        value = new_value;
-                                    }
-                                    catch (const error& e)
-                                    {
-                                        error_message = error_to_string(e);
-                                    }
+                                    set_option(opt, new_value, error_message);
                                 }
-
                                 edit_mode = false;
+                            }
+                            else if (use_cm_units)
+                            {
+                                buff_str = convert_float_str(buff_str, 0.01f);
+                                memset(buff, 0, TEXT_BUFF_SIZE);
+                                strcpy(buff, buff_str.c_str());
                             }
                             edit_value = buff;
                         }
@@ -611,28 +755,60 @@ namespace rs2
                                 static_cast<int>(range.step)))
                             {
                                 // TODO: Round to step?
-                                value = static_cast<float>(int_value);
-                                model.add_log(to_string() << "Setting " << opt << " to " << value);
-                                endpoint->set_option(opt, value);
+                                model.add_log(to_string() << "Setting " << opt << " to " << int_value);
+                                set_option(opt, static_cast<float>(int_value), error_message);
                                 *invalidate_flag = true;
                                 res = true;
                             }
                         }
                         else
                         {
-                            if (ImGui::SliderFloat(id.c_str(), &value,
-                                range.min, range.max, "%.4f"))
+                            float tmp_value = value;
+                            float temp_value_displayed = tmp_value;
+                            float min_range_displayed = range.min;
+                            float max_range_displayed = range.max;
+
+                            // computing the number of decimal digits taken from the step options' property
+                            // this will then be used to format the displayed value
+                            auto num_of_decimal_digits = [](float f) {
+                                int res = 0;
+                                while (f && (int)f == 0)
+                                {
+                                    f *= 10.f;
+                                    ++res;
+                                }
+                                return res;
+                            };
+                            int num_of_decimal_digits_displayed = num_of_decimal_digits(range.step);
+
+                            // displaying in cm instead of meters for D405
+                            if (use_cm_units)
                             {
-                                auto loffset = std::abs(fmod(value, range.step));
+                                temp_value_displayed *= 100.f;
+                                min_range_displayed *= 100.f;
+                                max_range_displayed *= 100.f;
+                                int updated_num_of_decimal_digits_displayed = num_of_decimal_digits_displayed - 2;
+                                if (updated_num_of_decimal_digits_displayed > 0)
+                                    num_of_decimal_digits_displayed = updated_num_of_decimal_digits_displayed;
+                            }
+
+                            std::stringstream formatting_ss;
+                            formatting_ss << "%." << num_of_decimal_digits_displayed << "f";
+
+                            if (ImGui::SliderFloat(id.c_str(), &temp_value_displayed,
+                                min_range_displayed, max_range_displayed, formatting_ss.str().c_str()))
+                            {
+                                tmp_value = use_cm_units ? temp_value_displayed / 100.f : temp_value_displayed;
+                                auto loffset = std::abs(fmod(tmp_value, range.step));
                                 auto roffset = range.step - loffset;
-                                if (value >= 0)
-                                    value = (loffset < roffset) ? value - loffset : value + roffset;
+                                if (tmp_value >= 0)
+                                    tmp_value = (loffset < roffset) ? tmp_value - loffset : tmp_value + roffset;
                                 else
-                                    value = (loffset < roffset) ? value + loffset : value - roffset;
-                                value = (value < range.min) ? range.min : value;
-                                value = (value > range.max) ? range.max : value;
-                                model.add_log(to_string() << "Setting " << opt << " to " << value);
-                                endpoint->set_option(opt, value);
+                                    tmp_value = (loffset < roffset) ? tmp_value + loffset : tmp_value - roffset;
+                                tmp_value = (tmp_value < range.min) ? range.min : tmp_value;
+                                tmp_value = (tmp_value > range.max) ? range.max : tmp_value;
+                                model.add_log(to_string() << "Setting " << opt << " to " << tmp_value);
+                                set_option(opt, tmp_value, error_message);
                                 *invalidate_flag = true;
                                 res = true;
                             }
@@ -657,7 +833,7 @@ namespace rs2
 
                     ImGui::SameLine();
                     if (new_line)
-                        ImGui::SetCursorPosX(pos_x + 135);
+                        ImGui::SetCursorPosX(pos_x + 120);
 
                     ImGui::PushItemWidth(new_line ? -1.f : 100.f);
 
@@ -672,13 +848,17 @@ namespace rs2
 
                     try
                     {
-                        if (ImGui::Combo(id.c_str(), &selected, labels.data(),
+                        int tmp_selected = selected;
+                        float tmp_value = value;
+                        ImGui::PushItemWidth(135.f);
+                        if (ImGui::Combo(id.c_str(), &tmp_selected, labels.data(),
                             static_cast<int>(labels.size())))
                         {
-                            value = range.min + range.step * selected;
+                            tmp_value = range.min + range.step * tmp_selected;
                             model.add_log(to_string() << "Setting " << opt << " to "
-                                << value << " (" << labels[selected] << ")");
-                            endpoint->set_option(opt, value);
+                                << tmp_value << " (" << labels[tmp_selected] << ")");
+                            set_option(opt, tmp_value, error_message);
+                            selected = tmp_selected;
                             if (invalidate_flag) *invalidate_flag = true;
                             res = true;
                         }
@@ -805,6 +985,12 @@ namespace rs2
             range.step == 1.0f;
     }
 
+    bool option_model::allow_change(float val, std::string& error_message) const
+    {
+        // Place here option restrictions
+        return true;
+    }
+
     void subdevice_model::populate_options(std::map<int, option_model>& opt_container,
         const std::string& opt_base_label,
         subdevice_model* model,
@@ -884,7 +1070,8 @@ namespace rs2
         std::shared_ptr<sensor> s,
         std::shared_ptr< atomic_objects_in_frame > device_detected_objects,
         std::string& error_message,
-        viewer_model& viewer
+        viewer_model& viewer,
+        bool new_device_connected
     )
         : s(s), dev(dev), tm2(), ui(), last_valid_ui(),
         streaming(false), _pause(false),
@@ -973,10 +1160,37 @@ namespace rs2
             if (shared_filter->is<hole_filling_filter>())
                 model->enable(false);
 
+            if (shared_filter->is<sequence_id_filter>())
+                model->enable(false);
+
             if (shared_filter->is<decimation_filter>())
             {
                 if (is_rgb_camera)
                     model->enable(false);
+            }
+
+            if (shared_filter->is<threshold_filter>())
+            {
+                if (s->supports(RS2_CAMERA_INFO_PRODUCT_ID))
+                {
+                // using short range for D405
+                    std::string device_pid = s->get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+                    if (device_pid == "0B5B")
+                    {
+                        std::string error_msg;
+                        auto threshold_pb = shared_filter->as<threshold_filter>();
+                        threshold_pb.set_option(RS2_OPTION_MIN_DISTANCE, SHORT_RANGE_MIN_DISTANCE);
+                        threshold_pb.set_option(RS2_OPTION_MAX_DISTANCE, SHORT_RANGE_MAX_DISTANCE);
+                    }
+                }
+            }
+
+            if (shared_filter->is<hdr_merge>())
+            {
+                // processing block will be skipped if the requested option is not supported
+                auto supported_options = s->get_supported_options();
+                if (std::find(supported_options.begin(), supported_options.end(), RS2_OPTION_SEQUENCE_ID) == supported_options.end())
+                    continue;
             }
 
             post_processing.push_back(model);
@@ -1003,7 +1217,21 @@ namespace rs2
         auto colorizer = std::make_shared<processing_block_model>(
             this, "Depth Visualization", depth_colorizer,
             [=](rs2::frame f) { return depth_colorizer->colorize(f); }, error_message);
-        const_effects.push_back(colorizer);
+        const_effects.push_back(colorizer);        
+
+
+        if (s->supports(RS2_CAMERA_INFO_PRODUCT_ID))
+        {
+            std::string device_pid = s->get_info(RS2_CAMERA_INFO_PRODUCT_ID);
+
+            // using short range for D405
+            if (device_pid == "0B5B")
+            {
+                std::string error_msg;
+                depth_colorizer->set_option(RS2_OPTION_MIN_DISTANCE, SHORT_RANGE_MIN_DISTANCE);
+                depth_colorizer->set_option(RS2_OPTION_MAX_DISTANCE, SHORT_RANGE_MAX_DISTANCE);
+            }
+        }
 
         ss.str("");
         ss << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
@@ -1031,15 +1259,19 @@ namespace rs2
         {
             auto sensor_profiles = s->get_stream_profiles();
             reverse(begin(sensor_profiles), end(sensor_profiles));
-            rs2_format def_format{ RS2_FORMAT_ANY };
+            std::map<int, rs2_format> def_format{ {0, RS2_FORMAT_ANY} };
             auto default_resolution = std::make_pair(1280, 720);
+            auto default_fps = 30;
             for (auto&& profile : sensor_profiles)
             {
                 std::stringstream res;
                 if (auto vid_prof = profile.as<video_stream_profile>())
                 {
                     if (profile.is_default())
+                    {
                         default_resolution = std::pair<int, int>(vid_prof.width(), vid_prof.height());
+                        default_fps = profile.fps();
+                    }
                     res << vid_prof.width() << " x " << vid_prof.height();
                     push_back_if_not_exists(res_values, std::pair<int, int>(vid_prof.width(), vid_prof.height()));
                     push_back_if_not_exists(resolutions, res.str());
@@ -1061,7 +1293,7 @@ namespace rs2
                 if (profile.is_default())
                 {
                     stream_enabled[profile.unique_id()] = true;
-                    def_format = profile.format();
+                    def_format[profile.unique_id()] = profile.format();
                 }
 
                 profiles.push_back(profile);
@@ -1082,36 +1314,13 @@ namespace rs2
 
             show_single_fps_list = is_there_common_fps();
 
-            // set default selections. USB2 configuration requires low-res resolution/fps.
             int selection_index{};
-            bool usb2 = false;
-            if (dev.supports(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR))
-            {
-                std::string dev_usb_type(dev.get_info(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR));
-                usb2 = (std::string::npos != dev_usb_type.find("2."));
-            }
-
-            int fps_constrain = usb2 ? 15 : 30;
-            auto resolution_constrain = usb2 ? std::make_pair(640, 480) : default_resolution;
-
-            // TODO: Once GLSL parts are properly optimised
-            // and tested on all types of hardware
-            // make sure we use Full-HD YUY overriding the default
-            // This will lower CPU utilisation and generally be faster
-            // if (!usb2 && std::string(s->get_info(RS2_CAMERA_INFO_NAME)) == "RGB Camera")
-            // {
-            //     if (config_file::instance().get(configurations::performance::glsl_for_rendering))
-            //     {
-            //         resolution_constrain = std::make_pair(1920, 1080);
-            //         def_format = RS2_FORMAT_YUYV;
-            //     }
-            // }
 
             if (!show_single_fps_list)
             {
                 for (auto fps_array : fps_values_per_stream)
                 {
-                    if (get_default_selection_index(fps_array.second, fps_constrain, &selection_index))
+                    if (get_default_selection_index(fps_array.second, default_fps, &selection_index))
                     {
                         ui.selected_fps_id[fps_array.first] = selection_index;
                         break;
@@ -1120,36 +1329,45 @@ namespace rs2
             }
             else
             {
-                if (get_default_selection_index(shared_fps_values, fps_constrain, &selection_index))
+                if (get_default_selection_index(shared_fps_values, default_fps, &selection_index))
                     ui.selected_shared_fps_id = selection_index;
             }
 
             for (auto format_array : format_values)
             {
-                if (get_default_selection_index(format_array.second, def_format, &selection_index))
+                if (get_default_selection_index(format_array.second, def_format[format_array.first], &selection_index))
                 {
                     ui.selected_format_id[format_array.first] = selection_index;
-                    break;
                 }
             }
 
-            get_default_selection_index(res_values, resolution_constrain, &selection_index);
+            get_default_selection_index(res_values, default_resolution, &selection_index);
             ui.selected_res_id = selection_index;
 
-            // Have the various preset options automatically update based on the resolution of the
-            // (closed) stream...
-            // TODO we have no res_values when loading color rosbag, and color sensor isn't
-            // even supposed to support SENSOR_MODE... see RS5-7726
-            if( s->supports( RS2_OPTION_SENSOR_MODE ) && !res_values.empty() )
+            if (new_device_connected)
             {
-                // Watch out for read-only options in the playback sensor!
-                try
+                // Have the various preset options automatically update based on the resolution of the
+                // (closed) stream...
+                // TODO we have no res_values when loading color rosbag, and color sensor isn't
+                // even supposed to support SENSOR_MODE... see RS5-7726
+                if( s->supports( RS2_OPTION_SENSOR_MODE ) && !res_values.empty() )
                 {
-                    s->set_option( RS2_OPTION_SENSOR_MODE, resolution_from_width_height( res_values[ui.selected_res_id].first, res_values[ui.selected_res_id].second ) );
-                }
-                catch( not_implemented_error const &)
-                {
-                    // Just ignore for now: need to figure out a way to write to playback sensors...
+                    // Watch out for read-only options in the playback sensor!
+                    try
+                    {
+                        auto requested_sensor_mode = static_cast<float>(resolution_from_width_height(
+                            res_values[ui.selected_res_id].first,
+                            res_values[ui.selected_res_id].second));
+
+                        auto currest_sensor_mode = s->get_option(RS2_OPTION_SENSOR_MODE);
+
+                        if (requested_sensor_mode != currest_sensor_mode)
+                            s->set_option(RS2_OPTION_SENSOR_MODE, requested_sensor_mode);
+                    }
+                    catch( not_implemented_error const &)
+                    {
+                        // Just ignore for now: need to figure out a way to write to playback sensors...
+                    }
                 }
             }
 
@@ -1207,7 +1425,7 @@ namespace rs2
         return true;
     }
 
-    bool subdevice_model::draw_stream_selection()
+    bool subdevice_model::draw_stream_selection(std::string& error_message)
     {
         bool res = false;
 
@@ -1215,8 +1433,9 @@ namespace rs2
             << s->get_info(RS2_CAMERA_INFO_NAME);
 
         auto streaming_tooltip = [&]() {
-            if (streaming && ImGui::IsItemHovered())
-                ImGui::SetTooltip("Can't modify while streaming");
+            if( ( ! allow_change_resolution_while_streaming && streaming )
+                && ImGui::IsItemHovered() )
+                ImGui::SetTooltip( "Can't modify while streaming" );
         };
 
         //ImGui::Columns(2, label.c_str(), false);
@@ -1235,7 +1454,7 @@ namespace rs2
             label = to_string() << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
                 << s->get_info(RS2_CAMERA_INFO_NAME) << " resolution";
 
-            if (streaming)
+            if( ! allow_change_resolution_while_streaming && streaming )
             {
                 ImGui::Text("%s", res_chars[ui.selected_res_id]);
                 streaming_tooltip();
@@ -1243,20 +1462,54 @@ namespace rs2
             else
             {
                 ImGui::PushItemWidth(-1);
-                ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 });
-                if (ImGui::Combo(label.c_str(), &ui.selected_res_id, res_chars.data(),
+                ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, { 1,1,1,1 }); 
+                auto tmp_selected_res_id = ui.selected_res_id;
+                if (ImGui::Combo(label.c_str(), &tmp_selected_res_id, res_chars.data(),
                     static_cast<int>(res_chars.size())))
                 {
                     res = true;
                     _options_invalidated = true;
 
-                    if (s->supports(RS2_OPTION_SENSOR_MODE))
+                    // Set sensor mode only at the Viewer app,
+                    // DQT app will handle the sensor mode when the streaming is off (while reseting the stream)
+                    if (s->supports(RS2_OPTION_SENSOR_MODE) && !allow_change_resolution_while_streaming)
                     {
-                        auto width = res_values[ui.selected_res_id].first;
-                        auto height = res_values[ui.selected_res_id].second;
+                        auto width = res_values[tmp_selected_res_id].first;
+                        auto height = res_values[tmp_selected_res_id].second;
                         auto res = resolution_from_width_height(width, height);
                         if (res >= RS2_SENSOR_MODE_VGA && res < RS2_SENSOR_MODE_COUNT)
-                            s->set_option(RS2_OPTION_SENSOR_MODE, float(res));
+                        {   
+                            try
+                            {
+                                s->set_option(RS2_OPTION_SENSOR_MODE, float(res));
+                            }
+                            catch (const error& e)
+                            {
+                                error_message = error_to_string(e);
+                            }
+
+                            // Only update the cached value once set_option is done! That way, if it doesn't change anything...
+                            try
+                            {
+                                int sensor_mode_val = static_cast<int>(s->get_option( RS2_OPTION_SENSOR_MODE ));
+                                {
+                                    ui.selected_res_id = get_resolution_id_from_sensor_mode(
+                                        static_cast< rs2_sensor_mode >( sensor_mode_val ),
+                                        *s,
+                                        res_values );
+                                }
+                            }
+                            catch (...) {}
+                        }
+                        else
+                        {
+                            error_message = to_string() << "Resolution " << width << "x" << height
+                                                        << " is not supported on this device";
+                        }
+                    }
+                    else
+                    {
+                        ui.selected_res_id = tmp_selected_res_id;
                     }
                 }
                 ImGui::PopStyleColor();
@@ -1278,7 +1531,7 @@ namespace rs2
                 label = to_string() << "##" << dev.get_info(RS2_CAMERA_INFO_NAME)
                     << s->get_info(RS2_CAMERA_INFO_NAME) << " fps";
 
-                if (streaming)
+                if( ! allow_change_fps_while_streaming && streaming )
                 {
                     ImGui::Text("%s", fps_chars[ui.selected_shared_fps_id]);
                     streaming_tooltip();
@@ -1757,9 +2010,10 @@ namespace rs2
         return results;
     }
 
-    void subdevice_model::stop(viewer_model& viewer)
+    void subdevice_model::stop(std::shared_ptr<notifications_model> not_model)
     {
-        viewer.not_model->add_log("Stopping streaming");
+        if ( not_model )
+            not_model->add_log("Stopping streaming");
 
         for_each(stream_display_names.begin(), stream_display_names.end(), [this](std::pair<int, std::string> kvp)
         {
@@ -1865,7 +2119,8 @@ namespace rs2
         try {
             s->start([&, syncer](frame f)
             {
-                if (viewer.synchronization_enable && is_synchronized_frame(viewer, f))
+			    // The condition here must match the condition inside render_loop()!
+                if( viewer.synchronization_enable )
                 {
                     syncer->invoke(f);
                 }
@@ -1939,12 +2194,12 @@ namespace rs2
                     }
                 }
 
-                if (next_option == RS2_OPTION_DEPTH_UNITS)
+                if (next == RS2_OPTION_DEPTH_UNITS)
                 {
                     opt_md.dev->depth_units = opt_md.value;
                 }
 
-                if (next_option == RS2_OPTION_STEREO_BASELINE)
+                if (next == RS2_OPTION_STEREO_BASELINE)
                     opt_md.dev->stereo_baseline = opt_md.value;
             }
 
@@ -1964,7 +2219,7 @@ namespace rs2
         for (auto i = 0; i < RS2_OPTION_COUNT; i++)
         {
             auto opt = static_cast<rs2_option>(i);
-            if (skip_option(opt)) continue;
+            if (viewer.is_option_skipped(opt)) continue;
             if (std::find(drawing_order.begin(), drawing_order.end(), opt) == drawing_order.end())
             {
                 draw_option(opt, update_read_only_options, error_message, notifications);
@@ -1977,7 +2232,7 @@ namespace rs2
         return (uint64_t)std::count_if(
             std::begin(options_metadata),
             std::end(options_metadata),
-            [](const std::pair<int, option_model>& p) {return p.second.supported && !skip_option(p.second.opt); });
+            [&](const std::pair<int, option_model>& p) {return p.second.supported && !viewer.is_option_skipped(p.second.opt); });
     }
 
     bool option_model::draw_option(bool update_read_only_options,
@@ -2002,9 +2257,25 @@ namespace rs2
             return draw(error_message, model);
     }
 
+    void option_model::set_option(rs2_option opt, float req_value, std::string &error_message)
+    {
+        try
+        {
+            endpoint->set_option(opt, req_value);
+        }
+        catch (const error& e)
+        {
+            error_message = error_to_string(e);
+        }
+        // Only update the cached value once set_option is done! That way, if it doesn't change anything...
+        try { value = endpoint->get_option(opt); }
+        catch (...) {}
+    }
+
     stream_model::stream_model()
         : texture(std::unique_ptr<texture_buffer>(new texture_buffer())),
-        _stream_not_alive(std::chrono::milliseconds(1500))
+        _stream_not_alive(std::chrono::milliseconds(1500)),
+        _stabilized_reflectivity(10)
     {
         show_map_ruler = config_file::instance().get_or_default(
             configurations::viewer::show_map_ruler, true);
@@ -2014,7 +2285,7 @@ namespace rs2
 
     std::shared_ptr<texture_buffer> stream_model::upload_frame(frame&& f)
     {
-        if (dev && dev->is_paused() && !dev->dev.is<playback>()) return nullptr;
+        if (dev && dev->is_paused()) return nullptr;
 
         last_frame = std::chrono::high_resolution_clock::now();
 
@@ -2114,7 +2385,7 @@ namespace rs2
         return !_stream_not_alive.eval();
     }
 
-    void stream_model::begin_stream(std::shared_ptr<subdevice_model> d, rs2::stream_profile p)
+    void stream_model::begin_stream(std::shared_ptr<subdevice_model> d, rs2::stream_profile p, const viewer_model& viewer)
     {
         dev = d;
         original_profile = p;
@@ -2135,7 +2406,105 @@ namespace rs2
                 static_cast<float>(vd.height()) };
         }
         _stream_not_alive.reset();
+        
+        try
+        {
+            auto ds = d->dev.first< depth_sensor >();
+            if( viewer._support_ir_reflectivity
+                && ds.supports( RS2_OPTION_ENABLE_IR_REFLECTIVITY )
+                && ds.supports( RS2_OPTION_ENABLE_MAX_USABLE_RANGE )
+                && ( ( p.stream_type() == RS2_STREAM_INFRARED )
+                     || ( p.stream_type() == RS2_STREAM_DEPTH ) ) )
+            {
+                _reflectivity = std::unique_ptr< reflectivity >( new reflectivity() );
+            }
+        }
+        catch(...) {};
 
+    }
+
+    bool stream_model::draw_reflectivity( int x,
+                                          int y,
+                                          rs2::depth_sensor ds,
+                                          const std::map< int, stream_model > & streams,
+                                          std::stringstream & ss,
+                                          bool same_line )
+    {
+        bool reflectivity_valid = false;
+
+        static const int MAX_PIXEL_MOVEMENT_TOLERANCE = 0;
+
+        if( std::abs( _prev_mouse_pos_x - x ) > MAX_PIXEL_MOVEMENT_TOLERANCE
+            || std::abs( _prev_mouse_pos_y - y ) > MAX_PIXEL_MOVEMENT_TOLERANCE )
+        {
+            _reflectivity->reset_history();
+            _stabilized_reflectivity.clear();
+            _prev_mouse_pos_x = x;
+            _prev_mouse_pos_y = y;
+        }
+
+        // Get IR sample for getting current reflectivity
+        auto ir_stream
+            = std::find_if( streams.cbegin(),
+                            streams.cend(),
+                            []( const std::pair< const int, stream_model > & stream ) {
+                                return stream.second.profile.stream_type() == RS2_STREAM_INFRARED;
+                            } );
+
+        // Get depth sample for adding to reflectivity history
+        auto depth_stream
+            = std::find_if( streams.cbegin(),
+                            streams.cend(),
+                            []( const std::pair< const int, stream_model > & stream ) {
+                                return stream.second.profile.stream_type() == RS2_STREAM_DEPTH;
+                            } );
+
+        if ((ir_stream != streams.end()) && (depth_stream != streams.end()))
+        {
+            auto depth_val = 0.0f;
+            auto ir_val = 0.0f;
+            depth_stream->second.texture->try_pick( x, y, &depth_val );
+            ir_stream->second.texture->try_pick( x, y, &ir_val );
+
+            _reflectivity->add_depth_sample( depth_val, x, y );  // Add depth sample to the history
+
+            float noise_est = ds.get_option( RS2_OPTION_NOISE_ESTIMATION );
+            auto mur_sensor = ds.as< max_usable_range_sensor >();
+            if( mur_sensor )
+            {
+                auto max_usable_range = mur_sensor.get_max_usable_depth_range();
+                reflectivity_valid = true;
+                std::string ref_str = "N/A";
+                try
+                {
+                    if (_reflectivity->is_history_full())
+                    {
+                        auto pixel_ref
+                            = _reflectivity->get_reflectivity(noise_est, max_usable_range, ir_val);
+                        _stabilized_reflectivity.add(pixel_ref);
+                        auto stabilized_pixel_ref = _stabilized_reflectivity.get( 0.75f ); // We use 75% stability for preventing spikes
+                        ref_str = to_string() << std::dec << round( stabilized_pixel_ref * 100 ) << "%";
+                    }
+                    else
+                    {
+                        // Show dots when calculating ,dots count [3-10]
+                        int dots_count = static_cast<int>(_reflectivity->get_samples_ratio() * 7);
+                        ref_str = "calculating...";
+                        ref_str += std::string(dots_count, '.');
+                    }
+                }
+                catch( ... )
+                {
+                }
+
+                if( same_line )
+                    ss << ", Reflectivity: " << ref_str;
+                else
+                    ss << "\nReflectivity: " << ref_str;
+            }
+        }
+
+        return reflectivity_valid;
     }
 
     void stream_model::update_ae_roi_rect(const rect& stream_rect, const mouse_info& mouse, std::string& error_message)
@@ -2146,7 +2515,7 @@ namespace rs2
             // Case 1: Starting Dragging of the ROI rect
             // Pre-condition: not capturing already + mouse is down + we are inside stream rect
             if (!capturing_roi && mouse.mouse_down[0] && stream_rect.contains(mouse.cursor))
-            {
+            {   
                 // Initialize roi_display_rect with drag-start position
                 roi_display_rect.x = mouse.cursor.x;
                 roi_display_rect.y = mouse.cursor.y;
@@ -2527,7 +2896,7 @@ namespace rs2
             label = to_string() << textual_icons::times << "##Stop " << profile.unique_id();
             if (ImGui::Button(label.c_str(), { 24, top_bar_height }))
             {
-                dev->stop(viewer);
+                dev->stop(viewer.not_model);
             }
             if (ImGui::IsItemHovered())
             {
@@ -2800,7 +3169,7 @@ namespace rs2
         ImGui::PopStyleColor(5);
     }
 
-    void stream_model::show_stream_footer(ImFont* font, const rect &stream_rect, const mouse_info& mouse, viewer_model& viewer)
+    void stream_model::show_stream_footer(ImFont* font, const rect &stream_rect, const mouse_info& mouse, const std::map<int, stream_model> &streams, viewer_model& viewer)
     {
         auto non_visual_stream = (profile.stream_type() == RS2_STREAM_GYRO)
             || (profile.stream_type() == RS2_STREAM_ACCEL)
@@ -2821,17 +3190,120 @@ namespace rs2
             float val{};
             if (texture->try_pick(x, y, &val))
             {
-                ss << " 0x" << std::hex << static_cast<int>(round(val)) << " =";
+                ss << " 0x" << std::hex << static_cast< int >( round( val ) );
             }
+
+            bool show_max_range = false;
+            bool show_reflectivity = false;
 
             if (texture->get_last_frame().is<depth_frame>())
             {
-                auto meters = texture->get_last_frame().as<depth_frame>().get_distance(x, y);
+                // Draw pixel distance
+                auto meters = texture->get_last_frame().as<depth_frame>().get_distance(x, y);             
 
                 if (viewer.metric_system)
-                    ss << std::dec << " " << std::setprecision(3) << meters << " meters";
+                {
+                    // depth is displayed in mm when distance is below 20 cm and gets back to meters when above 30 cm
+                    static bool display_in_mm = false;
+                    if (!display_in_mm && meters > 0.f && meters < 0.2f)
+                    {
+                        display_in_mm = true;
+                    }
+                    else if (display_in_mm && meters > 0.3f)
+                    {
+                        display_in_mm = false;
+                    }
+                    if (display_in_mm)
+                        ss << std::dec << " = " << std::setprecision(3) << meters * 1000 << " millimeters";
+                    else
+                        ss << std::dec << " = " << std::setprecision(3) << meters << " meters";
+                }
                 else
-                    ss << std::dec << " " << std::setprecision(3) << meters / FEET_TO_METER << " feet";
+                    ss << std::dec << " = " << std::setprecision(3) << meters / FEET_TO_METER << " feet";
+
+                // Draw maximum usable depth range
+                auto ds = sensor_from_frame(texture->get_last_frame())->as<depth_sensor>();
+                if (!viewer.is_option_skipped(RS2_OPTION_ENABLE_MAX_USABLE_RANGE))
+                {
+                    if (ds.supports(RS2_OPTION_ENABLE_MAX_USABLE_RANGE) && 
+                        (ds.get_option(RS2_OPTION_ENABLE_MAX_USABLE_RANGE) == 1.0f))
+                    {
+                        auto mur_sensor = ds.as<max_usable_range_sensor>();
+                        if (mur_sensor)
+                        {
+                            show_max_range = true;
+                            auto max_usable_range = mur_sensor.get_max_usable_depth_range();
+                            const float MIN_RANGE = 1.5f;
+                            const float MAX_RANGE = 9.0f;
+                            // display maximum usable range in range 1.5-9 [m] at 1.5 [m] resolution (rounded)
+                            auto max_usable_range_limited = std::min(std::max(max_usable_range, MIN_RANGE), MAX_RANGE);
+
+                            //round to 1.5 [m]
+                            auto max_usable_range_rounded = static_cast<int>(max_usable_range_limited / 1.5f) * 1.5f;
+
+                            if (viewer.metric_system)
+                                ss << std::dec << "\nMax usable range: " << std::setprecision(1) << max_usable_range_rounded << " meters";
+                            else
+                                ss << std::dec << "\nMax usable range: " << std::setprecision(1) << max_usable_range_rounded / FEET_TO_METER << " feet";
+                        }
+                    }
+                }
+
+                // Draw IR reflectivity on depth frame
+                if (_reflectivity)
+                {
+                    if (ds.get_option(RS2_OPTION_ENABLE_IR_REFLECTIVITY) == 1.0f)
+                    {
+                        rect roi_for_reflectivity{
+                            (float)dev->algo_roi.min_x,
+                            (float)dev->algo_roi.min_y,
+                            (float)( dev->algo_roi.max_x - dev->algo_roi.min_x ),
+                            (float)( dev->algo_roi.max_y - dev->algo_roi.min_y ) };
+
+                        auto normalized_roi = roi_for_reflectivity
+                                                  .normalize( _normalized_zoom.unnormalize( get_original_stream_bounds() ) )
+                                                  .unnormalize( stream_rect )
+                                                  .cut_by( stream_rect );
+
+                        if ((0.2f == roi_percentage) && normalized_roi.contains(mouse.cursor))
+                        {
+                            // Add reflectivity information on frame, if max usable range is displayed, display reflectivity on the same line
+                            show_reflectivity = draw_reflectivity(x, y, ds, streams, ss, show_max_range);
+                        }
+                    }
+                }
+            }
+
+            // Draw IR reflectivity on IR frame
+            if (_reflectivity)
+            {
+                bool lf_exist = texture->get_last_frame();
+                if (lf_exist)
+                {
+                    auto ds = sensor_from_frame(texture->get_last_frame())->as<depth_sensor>();
+                    if (ds.get_option( RS2_OPTION_ENABLE_IR_REFLECTIVITY ) == 1.0f )
+                    {
+                        bool lf_exist = texture->get_last_frame();
+                        if (is_stream_alive() && texture->get_last_frame().get_profile().stream_type() == RS2_STREAM_INFRARED)
+                        {
+                            rect roi_for_reflectivity{
+                                (float)dev->algo_roi.min_x,
+                                (float)dev->algo_roi.min_y,
+                                (float)(dev->algo_roi.max_x - dev->algo_roi.min_x),
+                                (float)(dev->algo_roi.max_y - dev->algo_roi.min_y) };
+
+                            auto normalized_roi = roi_for_reflectivity
+                                                      .normalize( _normalized_zoom.unnormalize( get_original_stream_bounds() ) )
+                                                      .unnormalize( stream_rect )
+                                                      .cut_by( stream_rect );
+
+                            if ((0.2f == roi_percentage) && normalized_roi.contains(mouse.cursor))
+                            {
+                                show_reflectivity = draw_reflectivity(x, y, ds, streams, ss, show_max_range);
+                            }
+                        }
+                    }
+                }
             }
 
             std::string msg(ss.str().c_str());
@@ -2839,14 +3311,25 @@ namespace rs2
             ImGui_ScopePushFont(font);
 
             // adjust windows size to the message length
-
+            auto new_line_start_idx = msg.find_first_of('\n');
+            int footer_vertical_size = 35;
             auto width = float(msg.size() * 8);
+
+            // adjust width according to the longest line
+            if (show_max_range || show_reflectivity)
+            {
+                footer_vertical_size = 50;
+                auto first_line_size = msg.find_first_of('\n') + 1;
+                auto second_line_size = msg.substr(new_line_start_idx).size();
+                width = std::max(first_line_size, second_line_size) * 8.0f;
+            }
+
             auto align = 20;
             width += align - (int)width % align;
 
-            ImVec2 pos{ stream_rect.x + 5, stream_rect.y + stream_rect.h - 35 };
+            ImVec2 pos{ stream_rect.x + 5, stream_rect.y + stream_rect.h - footer_vertical_size };
             ImGui::GetWindowDrawList()->AddRectFilled({ pos.x, pos.y },
-                { pos.x + width, pos.y + 30 }, ImColor(dark_sensor_bg));
+                { pos.x + width, pos.y + footer_vertical_size - 5 }, ImColor(dark_sensor_bg));
 
             ImGui::SetCursorScreenPos({ pos.x + 10, pos.y + 5 });
 
@@ -2857,6 +3340,14 @@ namespace rs2
 
             ImGui::Text("%s", msg.c_str());
             ImGui::PopStyleColor(2);
+        }
+        else
+        {
+            if (_reflectivity)
+            {
+                _reflectivity->reset_history();
+                _stabilized_reflectivity.clear();
+            }
         }
     }
 
@@ -3108,7 +3599,8 @@ namespace rs2
             ss << "PNG snapshot was saved to " << filename_png << std::endl;
         }
 
-        auto original_frame = texture->get_last_frame(false).as<video_frame>();
+        auto last_frame = texture->get_last_frame( false );
+        auto original_frame = last_frame.as< video_frame >();
 
         // For Depth-originated streams also provide a copy of the raw data accompanied by sensor-specific metadata
         if (original_frame && val_in_range(original_frame.get_profile().stream_type(), { RS2_STREAM_DEPTH , RS2_STREAM_INFRARED }))
@@ -3141,6 +3633,57 @@ namespace rs2
             }
         }
 
+        auto motion = last_frame.as< motion_frame >();
+        if( motion )
+        {
+            stream_desc = rs2_stream_to_string( motion.get_profile().stream_type() );
+
+            // And the frame's attributes
+            auto filename = filename_base + "_" + stream_desc + ".csv";
+
+            try
+            {
+                if( motion_data_to_csv( filename, motion ) )
+                    ss << "The frame attributes are saved into\n" << filename;
+                else
+                    viewer.not_model->add_notification(
+                        { to_string() << "Failed to save frame file " << filename,
+                          RS2_LOG_SEVERITY_INFO,
+                          RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR } );
+            }
+            catch( std::exception & e )
+            {
+                viewer.not_model->add_notification( { to_string() << e.what(),
+                                                      RS2_LOG_SEVERITY_INFO,
+                                                      RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR } );
+            }
+        }
+
+        auto pose = last_frame.as< pose_frame >();
+        if( pose )
+        {
+            stream_desc = rs2_stream_to_string( pose.get_profile().stream_type() );
+
+            // And the frame's attributes
+            auto filename = filename_base + "_" + stream_desc + ".csv";
+
+            try
+            {
+                if( pose_data_to_csv( filename, pose ) )
+                    ss << "The frame attributes are saved into\n" << filename;
+                else
+                    viewer.not_model->add_notification(
+                        { to_string() << "Failed to save frame file " << filename,
+                          RS2_LOG_SEVERITY_INFO,
+                          RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR } );
+            }
+            catch( std::exception & e )
+            {
+                viewer.not_model->add_notification( { to_string() << e.what(),
+                                                      RS2_LOG_SEVERITY_INFO,
+                                                      RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR } );
+            }
+        }
         if (ss.str().size())
             viewer.not_model->add_notification(notification_data{ 
                 ss.str().c_str(), RS2_LOG_SEVERITY_INFO, RS2_NOTIFICATION_CATEGORY_HARDWARE_EVENT });
@@ -3214,7 +3757,6 @@ namespace rs2
                     float(dev->algo_roi.max_y - dev->algo_roi.min_y) };
 
             r = r.normalize(_normalized_zoom.unnormalize(get_original_stream_bounds())).unnormalize(stream_rect).cut_by(stream_rect);
-
             glColor3f(yellow.x, yellow.y, yellow.z);
             draw_rect(r, 2);
 
@@ -3224,6 +3766,7 @@ namespace rs2
                 draw_text(static_cast<int>(r.x + r.w / 2 - msg_width / 2), static_cast<int>(r.y + 10), message.c_str());
 
             glColor3f(1.f, 1.f, 1.f);
+            roi_percentage = dev->roi_percentage;
         }
 
         update_ae_roi_rect(stream_rect, g, error_message);
@@ -3266,9 +3809,90 @@ namespace rs2
     {
         for (auto&& n : related_notifications) n->dismiss(false);
 
-        _updates->set_device_status(_updates_profile, false);
+        _updates->set_device_status(*_updates_profile, false);
     }
 
+    bool device_model::check_for_bundled_fw_update(const rs2::context &ctx, std::shared_ptr<notifications_model> not_model , bool reset_delay )
+    {
+        // LibRS can have a "bundled" FW binary downloaded during CMake. That's the version
+        // "available" to us, but it may not be there (e.g., no internet connection to download
+        // it). Lacking an available version, we try to let the user choose a "recommended"
+        // version for download. The recommended version is defined by the device (and comes
+        // from a #define).
+        if( dev.supports( RS2_CAMERA_INFO_FIRMWARE_VERSION )
+            && dev.supports( RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION )
+            && dev.supports( RS2_CAMERA_INFO_PRODUCT_LINE ) )
+        {
+            std::string fw = dev.get_info( RS2_CAMERA_INFO_FIRMWARE_VERSION );
+            std::string recommended_fw_ver
+                = dev.get_info( RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION );
+
+            int product_line
+                = parse_product_line( dev.get_info( RS2_CAMERA_INFO_PRODUCT_LINE ) );
+
+            bool allow_rc_firmware = config_file::instance().get_or_default(
+                configurations::update::allow_rc_firmware,
+                false );
+            bool is_rc = ( product_line == RS2_PRODUCT_LINE_D400 ) && allow_rc_firmware;
+            std::string available_fw_ver = get_available_firmware_version( product_line );
+
+            std::shared_ptr< firmware_update_manager > manager = nullptr;
+
+            if( is_upgradeable( fw, available_fw_ver) )
+            {
+                recommended_fw_ver = available_fw_ver;
+
+                static auto table = create_default_fw_table();
+
+                manager = std::make_shared< firmware_update_manager >( not_model,
+                                                                       *this,
+                                                                       dev,
+                                                                       ctx,
+                                                                       table[product_line],
+                                                                       true );
+            }
+
+            auto dev_name = get_device_name(dev);
+            if( is_upgradeable( fw, recommended_fw_ver) )
+            {
+                std::stringstream msg;
+                msg << dev_name.first << " (S/N " << dev_name.second << ")\n"
+                    << "Current Version: " << fw << "\n";
+
+                if( is_rc )
+                    msg << "Release Candidate: " << recommended_fw_ver << " Pre-Release";
+                else
+                    msg << "Recommended Version: " << recommended_fw_ver;
+
+                auto n = std::make_shared< fw_update_notification_model >( msg.str(),
+                                                                           manager,
+                                                                           false );
+                // The FW update delay ID include the dismissed recommended version and the device serial number
+                // This way a newer FW recommended version will not be dismissed 
+                n->delay_id = "fw_update_alert." + recommended_fw_ver + "." + dev_name.second;
+                n->enable_complex_dismiss = true;
+
+                if( reset_delay ) n->reset_delay();
+
+                if( ! n->is_delayed() )
+                {
+                    not_model->add_notification( n );
+                    related_notifications.push_back( n );
+                    return true;
+                }
+            }
+            else
+            {
+                std::stringstream msg;
+                msg << "Current FW >= Bundled FW for: " << dev_name.first << " (S/N " << dev_name.second << ")\n"
+                    << "Current Version: " << fw << "\n" 
+                    << "Recommended Version: " << recommended_fw_ver;
+
+                not_model->add_log(msg.str(), RS2_LOG_SEVERITY_DEBUG);
+            }
+        }
+        return false;
+    }
 
     void device_model::refresh_notifications(viewer_model& viewer)
     {
@@ -3276,67 +3900,9 @@ namespace rs2
 
         auto name = get_device_name(dev);
 
-        check_for_device_updates(viewer.ctx, viewer.updates);
-
-        if ((bool)config_file::instance().get(configurations::update::recommend_updates))
-        {
-            bool fw_update_required = false;
-            for (auto&& sub : dev.query_sensors())
-            {
-                if (sub.supports(RS2_CAMERA_INFO_FIRMWARE_VERSION) &&
-                    sub.supports(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION) &&
-                    sub.supports(RS2_CAMERA_INFO_PRODUCT_LINE))
-                {
-                    std::string fw = sub.get_info(RS2_CAMERA_INFO_FIRMWARE_VERSION);
-                    std::string recommended = sub.get_info(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION);
-
-                    int product_line = parse_product_line(sub.get_info(RS2_CAMERA_INFO_PRODUCT_LINE));
-
-                    bool allow_rc_firmware = config_file::instance().get_or_default(configurations::update::allow_rc_firmware, false);
-                    bool is_rc = (product_line == RS2_PRODUCT_LINE_D400) && allow_rc_firmware;
-                    std::string available = get_available_firmware_version(product_line);
-
-                    std::shared_ptr<firmware_update_manager> manager = nullptr;
-
-                    if (is_upgradeable(fw, available))
-                    {
-                        recommended = available;
-
-                        static auto table = create_default_fw_table();
-
-                        manager = std::make_shared<firmware_update_manager>(*this, dev, viewer.ctx, table[product_line], true);
-                    }
-
-                    if (is_upgradeable(fw, recommended))
-                    {
-                        std::stringstream msg;
-                        msg << name.first << " (S/N " << name.second << ")\n"
-                            << "Current Version: " << fw << "\n";
-
-                        if (is_rc)
-                            msg << "Release Candidate: " << recommended << " Pre-Release";
-                        else
-                            msg << "Recommended Version: " << recommended;
-
-                        if (!fw_update_required)
-                        {
-                            auto n = std::make_shared<fw_update_notification_model>(
-                                msg.str(), manager, false);
-                            n->delay_id = "dfu." + name.second;
-                            n->enable_complex_dismiss = true;
-                            if (!n->is_delayed())
-                            {
-                                viewer.not_model->add_notification(n);
-
-                                fw_update_required = true;
-
-                                related_notifications.push_back(n);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Inhibit on DQT / Playback device
+        if( _allow_remove && ( ! dev.is< playback >() ) )
+            check_for_device_updates(viewer);
 
         if ((bool)config_file::instance().get(configurations::update::recommend_calibration))
         {
@@ -3371,20 +3937,27 @@ namespace rs2
         }
     }
 
-    device_model::device_model(device& dev, std::string& error_message, viewer_model& viewer)
+    device_model::device_model(device& dev, std::string& error_message, viewer_model& viewer, bool new_device_connected, bool remove)
         : dev(dev),
         _calib_model(dev),
         syncer(viewer.syncer),
-        _update_readonly_options_timer(std::chrono::seconds(6))
-        , _detected_objects(std::make_shared< atomic_objects_in_frame >()),
-        _updates(viewer.updates)
+        _update_readonly_options_timer(std::chrono::seconds(6)),
+        _detected_objects(std::make_shared< atomic_objects_in_frame >()),
+        _updates(viewer.updates),
+        _updates_profile(std::make_shared<dev_updates_profile::update_profile>()),
+        _allow_remove(remove)
     {
         auto name = get_device_name(dev);
         id = to_string() << name.first << ", " << name.second;
 
         for (auto&& sub : dev.query_sensors())
         {
-            auto model = std::make_shared<subdevice_model>(dev, std::make_shared<sensor>(sub), _detected_objects, error_message, viewer);
+            auto s = std::make_shared<sensor>(sub);
+            auto objects = std::make_shared< atomic_objects_in_frame >();
+            // checking if the sensor is color_sensor or is D405 (with integrated RGB in depth sensor)
+            if (s->is<color_sensor>() || (dev.supports(RS2_CAMERA_INFO_PRODUCT_ID) && !strcmp(dev.get_info(RS2_CAMERA_INFO_PRODUCT_ID), "0B5B")))
+                objects = _detected_objects;
+            auto model = std::make_shared<subdevice_model>(dev, std::make_shared<sensor>(sub), objects, error_message, viewer, new_device_connected);
             subdevices.push_back(model);
         }
 
@@ -3448,6 +4021,7 @@ namespace rs2
                 if ((friendly_name.find("Tracking") != std::string::npos) ||
                     (friendly_name.find("Motion") != std::string::npos))
                 {
+                    viewer.synchronization_enable_prev_state = viewer.synchronization_enable.load();
                     viewer.synchronization_enable = false;
                 }
                 sub->play(profiles, viewer, dev_syncer);
@@ -3493,19 +4067,6 @@ namespace rs2
                     res = pp->invoke(res);
         }
 
-        // Override the zero pixel in texture frame with black color for occlusion invalidation
-        // TODO - this is a temporal solution to be refactored from the app level into the core library
-        if (auto set = res.as<frameset>())
-        {
-            for (auto f : set)
-            {
-                zero_first_pixel(f);
-            }
-        }
-        else
-        {
-            zero_first_pixel(f);
-        }
         return res;
     }
 
@@ -3765,7 +4326,7 @@ namespace rs2
             sub_dev_model->_is_being_recorded = false;
         }
         is_recording = false;
-        notification_data nd{ to_string() << "Saved recording to: " << saved_to_filename,
+        notification_data nd{ to_string() << "Saved recording to:\n" << saved_to_filename,
             RS2_LOG_SEVERITY_INFO,
             RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR };
         viewer.not_model->add_notification(nd);
@@ -3815,7 +4376,10 @@ namespace rs2
             }
             auto curr_frame = p.get_position();
             uint64_t step = uint64_t(1000.0 / (float)fps * 1e6);
-            p.seek(std::chrono::nanoseconds(curr_frame - step));
+            if (curr_frame >= step)
+            {
+                p.seek(std::chrono::nanoseconds(curr_frame - step));
+            }
         }
         if (ImGui::IsItemHovered())
         {
@@ -3867,7 +4431,7 @@ namespace rs2
                         if (s->streaming)
                             s->resume();
                     }
-
+                    viewer.paused = false;
                     p.resume();
                 }
 
@@ -4010,12 +4574,13 @@ namespace rs2
         duration -= mm;
         auto ss = duration_cast<seconds>(duration);
         duration -= ss;
+        auto ms = duration_cast<milliseconds>(duration);
 
         std::ostringstream stream;
         stream << std::setfill('0') << std::setw(hhh.count() >= 10 ? 2 : 1) << hhh.count() << ':' <<
             std::setfill('0') << std::setw(2) << mm.count() << ':' <<
-            std::setfill('0') << std::setw(2) << ss.count();// << '.' <<
-            //std::setfill('0') << std::setw(3) << ms.count();
+            std::setfill('0') << std::setw(2) << ss.count() << '.' <<
+            std::setfill('0') << std::setw(3) << ms.count();
         return stream.str();
     }
 
@@ -4126,7 +4691,7 @@ namespace rs2
         return device_names;
     }
 
-    bool yes_no_dialog(const std::string& title, const std::string& message_text, bool& approved, ux_window& window, const std::string& error_message, bool disabled = false)
+    bool yes_no_dialog(const std::string& title, const std::string& message_text, bool& approved, ux_window& window, const std::string& error_message, bool disabled, const std::string& disabled_reason)
     {
         ImGui_ScopePushFont(window.get_font());
         ImGui_ScopePushStyleColor(ImGuiCol_Button, button_color);
@@ -4153,7 +4718,7 @@ namespace rs2
                 ImGui_ScopePushStyleColor(ImGuiCol_Text, light_grey);
                 ImGui::Separator();
                 ImGui::SetWindowFontScale(1.1f);
-                ImGui::Text("\n%s\n\n", message_text.c_str());
+                ImGui::Text("\n%s\n", message_text.c_str());
 
                 if (!disabled)
                 {
@@ -4179,6 +4744,10 @@ namespace rs2
                 else
                 {
                     ImGui::NewLine();
+                    {
+                        ImGui_ScopePushStyleColor(ImGuiCol_Text, red);
+                        ImGui::Text("%s\n\n", disabled_reason.c_str());
+                    }
                     auto window_width = ImGui::GetWindowWidth();
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + window_width / 2.f - 30.f - ImGui::GetStyle().WindowPadding.x);
                     if (ImGui::Button("Close", ImVec2(60, 30)))
@@ -4270,178 +4839,7 @@ namespace rs2
         return keep_showing;
     }
 
-    bool device_model::prompt_trigger_camera_accuracy_health(ux_window& window, viewer_model& viewer, const std::string& error_message)
-    {
-        // This process is built from a 2 stages windows, first a yes/no window and then a process window
-        bool keep_showing = true;
-        bool yes_was_chosen = false;
-
-        switch (cah_model.cah_state.load())
-        {
-        case camera_accuracy_health_model::model_state_type::TRIGGER_MODAL:
-        {
-            // Make sure the firmware meets the minimal version for Trigger Camera Accuracy features
-            const std::string& min_fw_version("1.4.1.0");
-            auto fw_upgrade_needed = is_upgradeable(dev.get_info(rs2_camera_info::RS2_CAMERA_INFO_FIRMWARE_VERSION), min_fw_version);
-            bool is_depth_streaming(false);
-            bool is_color_streaming(false);
-
-            std::string message_text = "Camera Accuracy Health will ensure you get the highest accuracy from your camera.\n\n"
-                "This process may take several minutes and requires special setup to get good results.\n"
-                "While it is working, the viewer will not be usable.\n\n";
-
-            if (fw_upgrade_needed)
-            {
-                std::string fw_upgrade_message = "Camera Accuracy Health requires a minimal FW version of " + min_fw_version +
-                    "\n\nPlease update your firmware and try again. ";
-
-                message_text += fw_upgrade_message;
-            }
-            else
-            {
-                is_depth_streaming = std::any_of(subdevices.begin(), subdevices.end(), [](const std::shared_ptr<subdevice_model>& sm) { return sm->streaming && sm->s->as<depth_sensor>(); });
-                is_color_streaming = std::any_of(subdevices.begin(), subdevices.end(), [](const std::shared_ptr<subdevice_model>& sm) { return sm->streaming && sm->s->as<color_sensor>(); });
-
-                if (is_depth_streaming && is_color_streaming)
-                {
-                    message_text += "Are you sure you want to continue?";
-                }
-                else
-                {
-                    std::string stream_missing_message = "Camera Accuracy Health cannot be triggered : both depth & RGB streams must be active.";
-                    message_text += stream_missing_message;
-                }
-
-            }
-
-            bool option_disabled = !is_depth_streaming || !is_color_streaming || fw_upgrade_needed;
-            if (yes_no_dialog("Camera Accuracy Health Trigger", message_text, yes_was_chosen, window, error_message, option_disabled))
-            {
-                if (yes_was_chosen)
-                {
-
-                    auto itr = std::find_if(subdevices.begin(), subdevices.end(), [](std::shared_ptr<subdevice_model> sub)
-                    {
-                        if (sub->s->as<depth_sensor>())
-                            return true;
-                        return false;
-                    });
-
-
-                    if (is_depth_streaming && is_color_streaming && itr != subdevices.end())
-                    {
-                        auto sd = *itr;
-                        sd->s->set_option(RS2_OPTION_TRIGGER_CAMERA_ACCURACY_HEALTH, 1.0f);
-                        device_calibration dev_cal(dev);
-                        // Register AC status change callback
-                        if (!cah_model.registered_to_callback)
-                        {
-                            cah_model.registered_to_callback = true;
-                            cah_model.cah_state = camera_accuracy_health_model::model_state_type::PROCESS_MODAL;
-                            cah_model.cah_process_start_time = std::chrono::high_resolution_clock::now();
-                            dev_cal.register_calibration_change_callback([&](rs2_calibration_status cal_status)
-                            {
-                                cah_model.calib_status = cal_status; 
-                            });
-                        }
-
-                    }
-                }
-                else
-                {
-                    keep_showing = false;
-                }
-            }
-        }
-        break;
-
-        case camera_accuracy_health_model::model_state_type::PROCESS_MODAL:
-        {
-            if (!cah_model.process_started)
-            {
-                cah_model.process_started = (cah_model.calib_status == RS2_CALIBRATION_SPECIAL_FRAME || cah_model.calib_status == RS2_CALIBRATION_STARTED);
-            }
-
-            bool process_finished(cah_model.calib_status == RS2_CALIBRATION_SUCCESSFUL || cah_model.calib_status == RS2_CALIBRATION_FAILED || cah_model.calib_status == RS2_CALIBRATION_NOT_NEEDED);
-
-            static std::map<rs2_calibration_status, std::string> status_map{
-                {RS2_CALIBRATION_SPECIAL_FRAME  , "In Progress" },
-                {RS2_CALIBRATION_STARTED        , "In Progress" },
-                {RS2_CALIBRATION_NOT_NEEDED     , "Ended" },
-                {RS2_CALIBRATION_SUCCESSFUL     , "Ended Successfully" },
-                {RS2_CALIBRATION_RETRY          , "In Progress" },
-                {RS2_CALIBRATION_FAILED         , "Ended With Failure" },
-                {RS2_CALIBRATION_SCENE_INVALID  , "In Progress" },
-                {RS2_CALIBRATION_BAD_RESULT     , "In Progress" } };
-
-            rs2_calibration_status calibration_status = cah_model.calib_status;
-
-            // We don't know if AC really started working so we add a timeout for not blocking the viewer forever.
-            if (!cah_model.process_started)
-            {
-                auto now = std::chrono::high_resolution_clock::now();
-                if (now > (cah_model.cah_process_start_time + std::chrono::seconds(30)))
-                {
-                    process_finished = true; // timeout
-                    calibration_status = RS2_CALIBRATION_FAILED;
-                }
-            }
-
-            const std::string & message = process_finished ?    "                                                               " : 
-                                                                "Camera Accuracy Health is In progress, this may take a while...";
-            if (status_dialog("Camera Accuracy Health Status", message, status_map[calibration_status], process_finished, window))
-            {
-                keep_showing = false;
-            }
-        }
-        break;
-        default:
-            break;
-
-        }
-
-        //reset internal elements
-        if (!keep_showing)
-        {
-            cah_model.cah_state = camera_accuracy_health_model::model_state_type::TRIGGER_MODAL;
-            cah_model.calib_status = RS2_CALIBRATION_RETRY;
-            cah_model.process_started = false;
-            cah_model.registered_to_callback = false;
-        }
-        return keep_showing;
-    }
-
-    bool device_model::prompt_reset_camera_accuracy_health(ux_window& window, const std::string& error_message)
-    {
-        bool keep_showing = true;
-        bool yes_was_chosen = false;
-
-        std::string message_text("This will reset the camera settings to their factory-calibrated state.\nYou will lose any improvements made with Camera Accuracy Health.\n\n Are you sure?");
-        if (yes_no_dialog("Camera Accuracy Health Reset", message_text, yes_was_chosen, window,error_message))
-        {
-            if (yes_was_chosen)
-            {
-                auto itr = std::find_if(subdevices.begin(), subdevices.end(), [](std::shared_ptr<subdevice_model> sub)
-                {
-                    if (sub->s->as<depth_sensor>())
-                        return true;
-                    return false;
-                });
-
-
-                if (itr != subdevices.end())
-                {
-                    auto sd = *itr;
-                    sd->s->set_option(RS2_OPTION_RESET_CAMERA_ACCURACY_HEALTH, 1.0f);
-
-                }
-            }
-            keep_showing = false;
-        }
-
-        return keep_showing;
-    }
-
+   
     bool device_model::draw_advanced_controls(viewer_model& view, ux_window& window, std::string& error_message)
     {
         bool was_set = false;
@@ -4530,11 +4928,10 @@ namespace rs2
 
             else return; // Aborted by the user
 
-            auto manager = std::make_shared<firmware_update_manager>(*this, dev, viewer.ctx, data, false);
+            auto manager = std::make_shared<firmware_update_manager>(viewer.not_model, *this, dev, viewer.ctx, data, false);
 
             auto n = std::make_shared<fw_update_notification_model>(
                 "Manual Update requested", manager, true);
-            n->forced = true;
             viewer.not_model->add_notification(n);
 
             for (auto&& n : related_notifications)
@@ -4580,12 +4977,11 @@ namespace rs2
                 else return; // Aborted by the user
             }
 
-            auto manager = std::make_shared<firmware_update_manager>(*this, dev, viewer.ctx, data, true);
+            auto manager = std::make_shared<firmware_update_manager>(viewer.not_model, *this, dev, viewer.ctx, data, true);
 
             auto n = std::make_shared<fw_update_notification_model>(
                 "Manual Update requested", manager, true);
             viewer.not_model->add_notification(n);
-            n->forced = true;
 
             for (auto&& n : related_notifications)
                 n->dismiss(false);
@@ -4605,43 +5001,159 @@ namespace rs2
             error_message = e.what();
         }
     }
-    void device_model::check_for_device_updates(rs2::context& ctx, std::shared_ptr<updates_model> updates)
+    void device_model::check_for_device_updates(viewer_model& viewer, bool activated_by_user )
     {
-        std::weak_ptr<updates_model> updates_model_protected(updates);
-        std::thread check_for_device_updates_thread([ctx, updates_model_protected, this]()
-        {
+        std::weak_ptr< updates_model > updates_model_protected( viewer.updates );
+        std::weak_ptr< dev_updates_profile::update_profile > update_profile_protected(
+            _updates_profile );
+        std::weak_ptr< notifications_model > notification_model_protected( viewer.not_model );
+        const context & ctx( viewer.ctx );
+        std::thread check_for_device_updates_thread( [ctx,
+                                                      updates_model_protected,
+                                                      notification_model_protected,
+                                                      this,
+                                                      update_profile_protected,
+                                                      activated_by_user]() {
             try
             {
+                bool need_to_check_bundle = true;
+                std::string server_url
+                    = config_file::instance().get( configurations::update::sw_updates_url );
+                bool use_local_file = false;
+                const std::string local_file_prefix = "file://";
 
-                auto server_url = config_file::instance().get(configurations::update::sw_updates_url);
-                sw_update::dev_updates_profile updates_profile(dev, server_url);
-
-                bool sw_update_required = updates_profile.retrieve_updates(versions_db_manager::LIBREALSENSE);
-                bool fw_update_required = updates_profile.retrieve_updates(versions_db_manager::FIRMWARE);
-
-                _updates_profile = updates_profile.get_update_profile();
-                updates_model::update_profile_model updates_profile_model(_updates_profile, ctx, this);
-
-                if (sw_update_required || fw_update_required)
+                // If URL contain a "file://"  prefix, we open it as local file and not downloading
+                // it from a server
+                if( server_url.find( local_file_prefix ) == 0 )
                 {
-                    if (auto viewer_updates = updates_model_protected.lock())
+                    use_local_file = true;
+                    server_url.erase( 0, local_file_prefix.length() );
+                }
+                sw_update::dev_updates_profile updates_profile( dev, server_url, use_local_file );
+
+                bool fail_access_db = false;
+                bool sw_online_update_available = updates_profile.retrieve_updates( sw_update::LIBREALSENSE, fail_access_db);
+                bool fw_online_update_available = updates_profile.retrieve_updates( sw_update::FIRMWARE, fail_access_db);
+                bool fw_bundled_update_available = false;
+                if (sw_online_update_available || fw_online_update_available)
+                {
+                    if (auto update_profile = update_profile_protected.lock())
                     {
-                        viewer_updates->add_profile(updates_profile_model);
+                        *update_profile = updates_profile.get_update_profile();
+                        updates_model::update_profile_model updates_profile_model(*update_profile,
+                            ctx,
+                            this);
+
+                        dev_updates_profile::version_info sw_update_info, fw_update_info;
+                        bool essential_sw_update_found = update_profile->get_sw_update(sw_update::ESSENTIAL, sw_update_info);
+                        bool essential_fw_update_found = update_profile->get_fw_update(sw_update::ESSENTIAL, fw_update_info);
+                        if (essential_sw_update_found || essential_fw_update_found)
+                        {
+                            if (auto viewer_updates = updates_model_protected.lock())
+                            {
+                                viewer_updates->add_profile(updates_profile_model);
+                                need_to_check_bundle = false;
+
+                                // Log the essential updates
+                                if (auto nm = notification_model_protected.lock())
+                                {
+                                    if( essential_sw_update_found )
+                                        nm->add_log(
+                                            to_string()
+                                                << update_profile->device_name << " (S/N "
+                                                << update_profile->serial_number << ")\n"
+                                                << "Current SW version: " << std::string( update_profile->software_version )
+                                                << "\nEssential SW version: "
+                                                << std::string( sw_update_info.ver ),
+                                            RS2_LOG_SEVERITY_WARN );
+                                    
+                                    if( essential_fw_update_found )
+                                        nm->add_log(
+                                            to_string()
+                                                << update_profile->device_name << " (S/N "
+                                                << update_profile->serial_number << ")\n"
+                                                << "Current FW version: " << std::string( update_profile->firmware_version )
+                                                << "\nEssential FW version: "
+                                                << std::string( fw_update_info.ver ),
+                                            RS2_LOG_SEVERITY_WARN );
+                                }
+                            }
+                        }
+                        else 
+                        {
+                            if (auto viewer_updates = updates_model_protected.lock())
+                            {
+                                // Do not create pop ups if the viewer updates windows is on
+                                if (viewer_updates->has_updates())
+                                {
+                                    need_to_check_bundle = false;
+                                }
+                                else
+                                {
+                                    if (sw_online_update_available)
+                                    {
+                                        if (auto nm = notification_model_protected.lock())
+                                        {
+                                            handle_online_sw_update( nm, update_profile, activated_by_user);
+                                        }
+                                    }
+                                    if (fw_online_update_available)
+                                    {
+                                        if (auto nm = notification_model_protected.lock())
+                                        {
+                                            need_to_check_bundle = !handle_online_fw_update( ctx, nm, update_profile , activated_by_user);
+                                        }
+                                    }
+                                }
+                            }
+                            // For updating current device profile if exists (Could update firmware version)
+                            if (auto viewer_updates = updates_model_protected.lock())
+                            {
+                                viewer_updates->update_profile(updates_profile_model);
+                            }
+                        }
                     }
                 }
-                else
-                {   // For updating current device profile if exists (Could update firmware version)
-                    if (auto viewer_updates = updates_model_protected.lock())
+                else if( auto nm = notification_model_protected.lock() )
+                {
+                    if ( activated_by_user && fail_access_db )
+                        nm->add_notification( { to_string() << textual_icons::wifi << "  Unable to retrieve updates.\nPlease check your network connection.\n",
+                                                RS2_LOG_SEVERITY_ERROR,
+                                                RS2_NOTIFICATION_CATEGORY_UNKNOWN_ERROR } );
+                    else
+                        nm->add_log( "No online SW / FW updates available" );
+                }
+
+                // If no on-line updates notification, offer bundled FW update if needed
+                if( need_to_check_bundle
+                    && (bool)config_file::instance().get( configurations::update::recommend_updates ) )
+                {
+                    if( auto nm = notification_model_protected.lock() )
                     {
-                        viewer_updates->update_profile(updates_profile_model);
+                        fw_bundled_update_available = check_for_bundled_fw_update( ctx, nm , activated_by_user);
+                    }
+                }
+
+                // When no updates available (on-line + bundled), add a notification to indicate "all up to date"
+                if( activated_by_user && ! fail_access_db && ! sw_online_update_available
+                    && ! fw_online_update_available && ! fw_bundled_update_available )
+                {
+                    auto n = std::make_shared< sw_update_up_to_date_model >();
+                    auto name = get_device_name(dev);
+                    n->delay_id = "no_updates_alert." + name.second;
+                   
+                    if (auto nm = notification_model_protected.lock())
+                    {
+                        nm->add_notification(n);
+                        related_notifications.push_back(n);
                     }
                 }
             }
-            catch (const std::exception& e)
+            catch( const std::exception & e )
             {
                 auto error = e.what();
             }
-        });
+        } );
 
         check_for_device_updates_thread.detach();
     }
@@ -4717,7 +5229,7 @@ namespace rs2
                 std::string default_path = config_file::instance().get(configurations::record::default_path);
                 if (!ends_with(default_path, "/") && !ends_with(default_path, "\\")) default_path += "/";
                 std::string default_filename = rs2::get_timestamped_file_name() + ".bag";
-                if (recording_setting == 0)
+                if (recording_setting == 0 && default_path.size() > 1 )
                 {
                     path = default_path + default_filename;
                 }
@@ -4872,8 +5384,7 @@ namespace rs2
                 }
             }
 
-
-            if (allow_remove)
+            if (_allow_remove)
             {
                 something_to_show = true;
 
@@ -4906,35 +5417,44 @@ namespace rs2
                     }
                 }
 
+                // fw update disabled when any sensor is streaming
+                ImGuiSelectableFlags updateFwFlags = (is_streaming) ? ImGuiSelectableFlags_Disabled : 0;
+
                 if (dev.is<rs2::updatable>() || dev.is<rs2::update_device>())
                 {
-                    if (ImGui::Selectable("Update Firmware..."))
+                    if (ImGui::Selectable("Update Firmware...", false, updateFwFlags))
                     {
                         begin_update({}, viewer, error_message);
                     }
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Install official signed firmware from file to the device");
-
-                    if (dev.supports(RS2_CAMERA_INFO_PRODUCT_LINE) && is_recommended_fw_available(dev.get_info(RS2_CAMERA_INFO_PRODUCT_LINE)))
                     {
-                        if (ImGui::Selectable("Install Recommended Firmware "))
+                        std::string tooltip = to_string() << "Install official signed firmware from file to the device" << (is_streaming ? " (Disabled while streaming)" : "");
+                        ImGui::SetTooltip("%s", tooltip.c_str());
+                    }
+
+
+                    if( dev.supports( RS2_CAMERA_INFO_PRODUCT_LINE )
+                        && ( dev.get_info( RS2_CAMERA_INFO_PRODUCT_LINE ) ) )
+                    {
+                        if( ImGui::Selectable( "Check For Updates", false, updateFwFlags ) )
                         {
-                            auto sensors = dev.query_sensors();
-                            auto product_line_str = "";
-                            if (dev.supports(RS2_CAMERA_INFO_PRODUCT_LINE))
-                                product_line_str = dev.get_info(RS2_CAMERA_INFO_PRODUCT_LINE);
-                            if (sensors.size() && sensors.front().supports(RS2_CAMERA_INFO_PRODUCT_LINE))
-                                product_line_str = sensors.front().get_info(RS2_CAMERA_INFO_PRODUCT_LINE);
-                            int product_line = parse_product_line(product_line_str);
+                            // Remove all previous SW/FW update notifications before triggering checking for updates logic
+                            for( auto && n : related_notifications )
+                            {
+                                if( n->is< fw_update_notification_model >()
+                                    || n->is< sw_recommended_update_alert_model >() )
+                                    n->dismiss( false ); // No need for snooze, if needed a new notification will be popped 
+                            }
 
-                            auto table = create_default_fw_table();
-
-                            begin_update(table[product_line], viewer, error_message);
+                            check_for_device_updates( viewer , true);
                         }
                     }
 
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Install default recommended firmware for this device");
+                    {
+                        std::string tooltip = to_string() << "Check for SW / FW updates";
+                        ImGui::SetTooltip("%s", tooltip.c_str());
+                    }
                 }
 
                 bool is_locked = true;
@@ -4943,35 +5463,28 @@ namespace rs2
 
                 if (dev.is<rs2::updatable>() && !is_locked)
                 {
-                    if (ImGui::Selectable("Update Unsigned Firmware..."))
+                    // L500 devices do not support update unsigned image currently
+                    bool is_l500_device = false;
+                    if (dev.supports(RS2_CAMERA_INFO_PRODUCT_LINE))
                     {
-                        begin_update_unsigned(viewer, error_message);
-                    }
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Install non official unsigned firmware from file to the device");
-                }
-            }
-
-#if 0 // Currently disable triggering/reseting CAH from UI
-            if (dev.supports(RS2_CAMERA_INFO_PRODUCT_LINE) && dev.supports(RS2_CAMERA_INFO_FIRMWARE_VERSION))
-            { 
-                auto product_line_str = dev.get_info(RS2_CAMERA_INFO_PRODUCT_LINE);
-                if (RS2_PRODUCT_LINE_L500 == parse_product_line(product_line_str))
-                {
-                    if (ImGui::Selectable("Trigger Camera Accuracy Health"))
-                    {
-                        // We cannot open a pop up window here since we are already in a pop up window
-                        // we trigger the pop up and activate it outside the menu pop up
-                        cah_model.show_trigger_camera_accuracy_health_popup = true;
+                        auto pl = dev.get_info(RS2_CAMERA_INFO_PRODUCT_LINE);
+                        is_l500_device = (std::string(pl) == "L500");
                     }
 
-                    if (ImGui::Selectable("Reset Camera Accuracy Health"))
+                    if( ! is_l500_device )
                     {
-                        cah_model.show_reset_camera_accuracy_health_popup = true;
+                        if (ImGui::Selectable("Update Unsigned Firmware...", false, updateFwFlags))
+                        {
+                            begin_update_unsigned(viewer, error_message);
+                        }
+                        if (ImGui::IsItemHovered())
+                        {
+                            std::string tooltip = to_string() << "Install non official unsigned firmware from file to the device" << (is_streaming ? " (Disabled while streaming)" : "");
+                            ImGui::SetTooltip("%s", tooltip.c_str());
+                        }
                     }
                 }
             }
-#endif
             
             bool has_autocalib = false;
             for (auto&& sub : subdevices)
@@ -4984,8 +5497,7 @@ namespace rs2
                         try
                         {
                             auto manager = std::make_shared<on_chip_calib_manager>(viewer, sub, *this, dev);
-                            auto n = std::make_shared<autocalib_notification_model>(
-                                "", manager, false);
+                            auto n = std::make_shared<autocalib_notification_model>("", manager, false);
 
                             viewer.not_model->add_notification(n);
                             n->forced = true;
@@ -4994,6 +5506,8 @@ namespace rs2
                             for (auto&& n : related_notifications)
                                 if (dynamic_cast<autocalib_notification_model*>(n.get()))
                                     n->dismiss(false);
+
+                            related_notifications.push_back(n);
                         }
                         catch (const error& e)
                         {
@@ -5027,6 +5541,8 @@ namespace rs2
                             for (auto&& n : related_notifications)
                                 if (dynamic_cast<autocalib_notification_model*>(n.get()))
                                     n->dismiss(false);
+
+                            related_notifications.push_back(n);
                         }
                         catch (const error& e)
                         {
@@ -5039,9 +5555,9 @@ namespace rs2
                     }
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("Tare calibration is used to adjust camera absolute distance to flat target.\n"
-                            "User needs to enter the known ground truth");
+                            "User needs either to enter the known ground truth or use the get button\n"
+                            "with specific target to get the ground truth.");
 
-                    
                     if (_calib_model.supports())
                     {
                         if (ImGui::Selectable("Calibration Data"))
@@ -5138,16 +5654,6 @@ namespace rs2
         }
 
 
-        if (cah_model.show_trigger_camera_accuracy_health_popup)
-        {
-            cah_model.show_trigger_camera_accuracy_health_popup = prompt_trigger_camera_accuracy_health(window, viewer, error_message);
-        }
-
-        if (cah_model.show_reset_camera_accuracy_health_popup)
-        {
-            cah_model.show_reset_camera_accuracy_health_popup = prompt_reset_camera_accuracy_health(window, error_message);
-        }
-
         if (keep_showing_advanced_mode_modal)
         {
             const bool is_advanced_mode_enabled = dev.as<advanced_mode>().is_enabled();
@@ -5238,6 +5744,108 @@ namespace rs2
                 }
             }
         }
+    }
+
+    void rs2::device_model::handle_online_sw_update(
+        std::shared_ptr< notifications_model > nm,
+        std::shared_ptr< dev_updates_profile::update_profile > update_profile,
+        bool reset_delay )
+    {
+        dev_updates_profile::version_info recommended_sw_update_info;
+        update_profile->get_sw_update(sw_update::RECOMMENDED, recommended_sw_update_info);
+        auto n = std::make_shared< sw_recommended_update_alert_model >(
+            RS2_API_FULL_VERSION_STR,
+            recommended_sw_update_info.ver,
+            recommended_sw_update_info.download_link);
+
+        auto dev_name = get_device_name(dev);
+        // The SW update delay ID include the dismissed recommended version and the device serial number
+        // This way a newer SW recommended version will not be dismissed. 
+        n->delay_id = "sw_update_alert." + std::string(recommended_sw_update_info.ver) + "." + dev_name.second;
+        n->enable_complex_dismiss = true;  // allow advanced dismiss menu
+
+        if ( reset_delay ) n->reset_delay();
+
+        if (!n->is_delayed())
+        {
+            nm->add_notification(n);
+            related_notifications.push_back(n);
+        }
+    }
+
+    bool rs2::device_model::handle_online_fw_update(
+        const context & ctx,
+        std::shared_ptr< notifications_model > nm,
+        std::shared_ptr< dev_updates_profile::update_profile > update_profile,
+        bool reset_delay )
+    {
+        bool fw_update_notification_raised = false;
+        std::shared_ptr< firmware_update_manager > manager = nullptr;
+
+        std::vector< uint8_t > fw_data;
+        http::http_downloader downloader;
+
+        // Try to download the recommended FW binary file
+        int download_retries = 3;
+        dev_updates_profile::version_info recommended_fw_update_info;
+        update_profile->get_fw_update(sw_update::RECOMMENDED, recommended_fw_update_info);
+
+        while (download_retries > 0)
+        {
+            if (downloader.download_to_bytes_vector(
+                recommended_fw_update_info.download_link,
+                fw_data))
+                download_retries = 0;
+            else
+                --download_retries;
+        }
+
+        // If the download process finished successfully, pop up a
+        // notification for the FW update process
+        if (!fw_data.empty())
+        {
+            manager = std::make_shared< firmware_update_manager >(nm,
+                *this,
+                dev,
+                ctx,
+                fw_data,
+                true);
+
+            auto dev_name = get_device_name(dev);
+            std::stringstream msg;
+            msg << dev_name.first << " (S/N " << dev_name.second << ")\n"
+                << "Current Version: "
+                << std::string(update_profile->firmware_version) << "\n";
+
+            msg << "Recommended Version: "
+                << std::string(recommended_fw_update_info.ver);
+
+            auto n = std::make_shared< fw_update_notification_model >(
+                msg.str(),
+                manager,
+                false);
+            n->delay_id = "fw_update_alert." +  std::string(recommended_fw_update_info.ver) + "." +  dev_name.second;
+            n->enable_complex_dismiss = true;
+
+            if ( reset_delay ) n->reset_delay();
+
+            if (!n->is_delayed())
+            {
+                nm->add_notification(n);
+                related_notifications.push_back(n);
+                fw_update_notification_raised = true;
+            }
+        }
+        else
+            nm->output.add_log(
+                RS2_LOG_SEVERITY_WARN,
+                __FILE__,
+                __LINE__,
+                to_string()
+                << "Error in downloading FW binary file: "
+                << recommended_fw_update_info.download_link);
+
+        return fw_update_notification_raised;
     }
 
     // Load viewer configuration for stereo module (depth/infrared streams) only
@@ -5515,14 +6123,24 @@ namespace rs2
                     ///////////////////////////////////////////
                     //TODO: make this a member function
                     std::vector<const char*> labels;
+                    std::vector< float > counters;
                     auto selected = 0, counter = 0;
-                    for (auto i = opt_model.range.min; i <= opt_model.range.max; i += opt_model.range.step, counter++)
+                    for (auto i = opt_model.range.min; i <= opt_model.range.max; i += opt_model.range.step)
                     {
+                        std::string product = dev.get_info( RS2_CAMERA_INFO_PRODUCT_LINE );
+
+                        // Default is only there for backwards compatibility and will throw an
+                        // exception if used
+                        if( product == "L500" && (size_t)(i) == RS2_L500_VISUAL_PRESET_DEFAULT )
+                            continue;
+
                         if (std::fabs(i - opt_model.value) < 0.001f)
                         {
                             selected = counter;
                         }
                         labels.push_back(opt_model.endpoint->get_option_value_description(opt_model.opt, i));
+                        counters.push_back( i );
+                        counter++;
                     }
                     ///////////////////////////////////////////
 
@@ -5566,15 +6184,14 @@ namespace rs2
                                 if (selected < static_cast<int>(labels.size() - files_labels.size()))
                                 {
                                     //Known preset was chosen
-                                    auto new_val = opt_model.range.min + opt_model.range.step * selected;
+                                    auto new_val = counters[selected];
                                     model.add_log(to_string() << "Setting " << opt_model.opt << " to "
-                                        << opt_model.value << " (" << labels[selected] << ")");
+                                        << new_val << " (" << labels[selected] << ")");
 
-                                    opt_model.endpoint->set_option(opt_model.opt, new_val);
+                                    opt_model.set_option(opt_model.opt, static_cast<float>(new_val), error_message);
 
                                     // Only apply preset to GUI if set_option was succesful
                                     selected_file_preset = "";
-                                    opt_model.value = new_val;
                                     is_clicked = true;
                                 }
                                 else
@@ -5623,7 +6240,12 @@ namespace rs2
         if (advanced_dev)
         {
             is_advanced_device = true;
-            is_advanced_mode_enabled = advanced_dev.is_enabled();
+            try
+            {
+                // Prevent intermittent errors in polling mode to keep imgui in sync
+                is_advanced_mode_enabled = advanced_dev.is_enabled();
+            }
+            catch (...){}
         }
 
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 3);
@@ -5641,6 +6263,13 @@ namespace rs2
             {
                 json_loading([&]()
                 {
+                    for( auto && sub : subdevices )
+                    {
+                        if( auto dpt = sub->s->as< depth_sensor >() )
+                        {
+                            sub->_options_invalidated = true;
+                        }
+                    }
                     auto ret = file_dialog_open(open_file, "JavaScript Object Notation (JSON)\0*.json\0", NULL, NULL);
                     if (ret)
                     {
@@ -5844,7 +6473,7 @@ namespace rs2
         ImGui::PushStyleColor(ImGuiCol_PopupBg, almost_white_bg);
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered, light_blue);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5, 5));
-        if (allow_remove)
+        if (_allow_remove)
         {
             ImGui::Columns(1);
             float horizontal_distance_from_right_side_of_panel = 47;
@@ -5855,7 +6484,7 @@ namespace rs2
                 for (auto&& sub : subdevices)
                 {
                     if (sub->streaming)
-                        sub->stop(viewer);
+                        sub->stop(viewer.not_model);
                 }
                 device_to_remove = this;
             }
@@ -6075,9 +6704,10 @@ namespace rs2
                                         ((friendly_name.find("Tracking") != std::string::npos) ||
                                         (friendly_name.find("Motion") != std::string::npos)))
                                     {
+                                        viewer.synchronization_enable_prev_state = viewer.synchronization_enable.load();
                                         viewer.synchronization_enable = false;
                                     }
-                                    _update_readonly_options_timer.signal();
+                                    _update_readonly_options_timer.set_expired();
                                     sub->play(profiles, viewer, dev_syncer);
                                 }
                                 catch (const error& e)
@@ -6109,7 +6739,13 @@ namespace rs2
 
                         if (ImGui::Button(label.c_str(), { 30,30 }))
                         {
-                            sub->stop(viewer);
+                            sub->stop(viewer.not_model);
+                            std::string friendly_name = sub->s->get_info(RS2_CAMERA_INFO_NAME);
+                            if ((friendly_name.find("Tracking") != std::string::npos) ||
+                                (friendly_name.find("Motion") != std::string::npos))
+                            {
+                                viewer.synchronization_enable = viewer.synchronization_enable_prev_state.load();
+                            }
 
                             if (!std::any_of(subdevices.begin(), subdevices.end(),
                                 [](const std::shared_ptr<subdevice_model>& sm)
@@ -6118,7 +6754,7 @@ namespace rs2
                             }))
                             {
                                 stop_recording = true;
-                                _update_readonly_options_timer.signal();
+                                _update_readonly_options_timer.set_expired();
                             }
                         }
                         if (ImGui::IsItemHovered())
@@ -6165,7 +6801,7 @@ namespace rs2
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, { 2, 2 });
 
                 if (show_stream_selection)
-                    sub->draw_stream_selection();
+                    sub->draw_stream_selection(error_message);
 
                 static const std::vector<rs2_option> drawing_order = serialize ?
                     std::vector<rs2_option>{                           RS2_OPTION_EMITTER_ENABLED, RS2_OPTION_ENABLE_AUTO_EXPOSURE }
@@ -6185,14 +6821,45 @@ namespace rs2
                     label = to_string() << "Controls ##" << sub->s->get_info(RS2_CAMERA_INFO_NAME) << "," << id;
                     if (ImGui::TreeNode(label.c_str()))
                     {
-                        for (auto&& i : sub->s->get_supported_options())
+                        std::vector<rs2_option> supported_options = sub->s->get_supported_options();
+
+                        // moving the color dedicated options to the end of the vector
+                        std::vector<rs2_option> color_options = {
+                            RS2_OPTION_BACKLIGHT_COMPENSATION,
+                            RS2_OPTION_BRIGHTNESS,
+                            RS2_OPTION_CONTRAST,
+                            RS2_OPTION_GAMMA,
+                            RS2_OPTION_HUE,
+                            RS2_OPTION_SATURATION,
+                            RS2_OPTION_SHARPNESS,
+                            RS2_OPTION_ENABLE_AUTO_WHITE_BALANCE,
+                            RS2_OPTION_WHITE_BALANCE
+                        };
+
+                        std::vector<rs2_option> so_ordered;
+
+                        for (auto&& i : supported_options)
+                        {
+                            auto it = find(color_options.begin(), color_options.end(), i);
+                            if (it == color_options.end())
+                                so_ordered.push_back(i);
+                        }
+
+                        std::for_each(color_options.begin(), color_options.end(), [&](rs2_option opt) {
+                            auto it = std::find(supported_options.begin(), supported_options.end(), opt);
+                            if (it != supported_options.end())
+                                so_ordered.push_back(opt);
+                            });
+
+                        for (auto&& i : so_ordered)
                         {
                             auto opt = static_cast<rs2_option>(i);
-                            if (skip_option(opt)) continue;
+                            if (viewer.is_option_skipped(opt)) continue;
                             if (std::find(drawing_order.begin(), drawing_order.end(), opt) == drawing_order.end())
                             {
                                 if (serialize && opt == RS2_OPTION_VISUAL_PRESET)
                                     continue;
+
                                 if (sub->draw_option(opt, dev.is<playback>() || update_read_only_options, error_message, *viewer.not_model))
                                 {
                                     get_curr_advanced_controls = true;
@@ -6224,10 +6891,19 @@ namespace rs2
                             for (auto i = 0; i < RS2_OPTION_COUNT; i++)
                             {
                                 auto opt = static_cast<rs2_option>(i);
-                                if (skip_option(opt)) continue;
+                                if (viewer.is_option_skipped(opt)) continue;
                                 pb->get_option(opt).draw_option(
                                     dev.is<playback>() || update_read_only_options,
                                     false, error_message, *viewer.not_model);
+
+                                if (opt == RS2_OPTION_MIN_DISTANCE)
+                                {
+                                    pb->get_option(RS2_OPTION_MAX_DISTANCE).update_all_fields(error_message, *viewer.not_model);
+                                }
+                                else if (opt == RS2_OPTION_MAX_DISTANCE)
+                                {
+                                    pb->get_option(RS2_OPTION_MIN_DISTANCE).update_all_fields(error_message, *viewer.not_model);
+                                }
                             }
 
                             ImGui::TreePop();
@@ -6418,10 +7094,19 @@ namespace rs2
                             {
                                 for (auto&& opt : pb->get_option_list())
                                 {
-                                    if (skip_option(opt)) continue;
+                                    if (viewer.is_option_skipped(opt)) continue;
                                     pb->get_option(opt).draw_option(
                                         dev.is<playback>() || update_read_only_options,
                                         false, error_message, *viewer.not_model);
+
+                                    if (opt == RS2_OPTION_MIN_DISTANCE)
+                                    {
+                                        pb->get_option(RS2_OPTION_MAX_DISTANCE).update_all_fields(error_message, *viewer.not_model);
+                                    }
+                                    else if (opt == RS2_OPTION_MAX_DISTANCE)
+                                    {
+                                        pb->get_option(RS2_OPTION_MIN_DISTANCE).update_all_fields(error_message, *viewer.not_model);
+                                    }
                                 }
 
                                 ImGui::TreePop();

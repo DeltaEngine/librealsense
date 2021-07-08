@@ -24,6 +24,7 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
+#include <iomanip> // std::put_time
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -38,7 +39,6 @@
 #include <linux/usb/video.h>
 #include <linux/uvcvideo.h>
 #include <linux/videodev2.h>
-#include <fts.h>
 #include <regex>
 #include <list>
 
@@ -49,14 +49,6 @@
 const size_t MAX_DEV_PARENT_DIR = 10;
 
 #include "../tm2/tm-boot.h"
-
-//#define DEBUG_V4L
-#ifdef DEBUG_V4L
-#define LOG_DEBUG_V4L(...)   do { CLOG(DEBUG   ,"librealsense") << __VA_ARGS__; } while(false)
-#else
-#define LOG_DEBUG_V4L(...)
-#endif //DEBUG_V4L
-
 
 #ifdef ANDROID
 
@@ -113,11 +105,23 @@ namespace librealsense
 {
     namespace platform
     {
+        std::recursive_mutex named_mutex::_init_mutex;
+        std::map<std::string, std::recursive_mutex> named_mutex::_dev_mutex;
+        std::map<std::string, int> named_mutex::_dev_mutex_cnt;
+
         named_mutex::named_mutex(const std::string& device_path, unsigned timeout)
             : _device_path(device_path),
               _timeout(timeout), // TODO: try to lock with timeout
-              _fildes(-1)
+              _fildes(-1),
+              _object_lock_counter(0)
         {
+            _init_mutex.lock();
+            _dev_mutex[_device_path];   // insert a mutex for _device_path
+            if (_dev_mutex_cnt.find(_device_path) == _dev_mutex_cnt.end())
+            {
+                _dev_mutex_cnt[_device_path] = 0;
+            }
+            _init_mutex.unlock();
         }
 
         named_mutex::~named_mutex()
@@ -156,32 +160,65 @@ namespace librealsense
 
         void named_mutex::acquire()
         {
-            if (-1 == _fildes)
+            _dev_mutex[_device_path].lock();
+            _dev_mutex_cnt[_device_path] += 1;  //Advance counters even if throws because catch calls release()
+            _object_lock_counter += 1;
+            if (_dev_mutex_cnt[_device_path] == 1)
             {
-                _fildes = open(_device_path.c_str(), O_RDWR, 0); //TODO: check
-                if(0 > _fildes)
-                    throw linux_backend_exception(to_string() << "Cannot open '" << _device_path);
-            }
+                if (-1 == _fildes)
+                {
+                    _fildes = open(_device_path.c_str(), O_RDWR, 0); //TODO: check
+                    if(0 > _fildes)
+                    {
+                        release();
+                        throw linux_backend_exception(to_string() << __FUNCTION__ << ": Cannot open '" << _device_path);
+                    }
+                }
 
-            auto ret = lockf(_fildes, F_LOCK, 0);
-            if (0 != ret)
-                throw linux_backend_exception(to_string() << "Acquire failed");
+                auto ret = lockf(_fildes, F_LOCK, 0);
+                if (0 != ret)
+                {
+                    release();
+                    throw linux_backend_exception(to_string() <<  __FUNCTION__ << ": Acquire failed");
+                }
+            }
         }
 
         void named_mutex::release()
         {
-            if (-1 == _fildes)
+            _object_lock_counter -= 1;
+            if (_object_lock_counter < 0)
+            {
+                _object_lock_counter = 0;
                 return;
+            }
+            _dev_mutex_cnt[_device_path] -= 1;
+            std::string err_msg;
+            if (_dev_mutex_cnt[_device_path] < 0)
+            {
+                _dev_mutex_cnt[_device_path] = 0;
+                throw linux_backend_exception(to_string() << "Error: _dev_mutex_cnt[" << _device_path << "] < 0");
+            }
 
-            auto ret = lockf(_fildes, F_ULOCK, 0);
-            if (0 != ret)
-                throw linux_backend_exception(to_string() << "lockf(...) failed");
+            if ((_dev_mutex_cnt[_device_path] == 0) && (-1 != _fildes))
+            {
+                auto ret = lockf(_fildes, F_ULOCK, 0);
+                if (0 != ret)
+                    err_msg = to_string() << "lockf(...) failed";
+                else
+                {
+                    ret = close(_fildes);
+                    if (0 != ret)
+                        err_msg = to_string() << "close(...) failed";
+                    else
+                        _fildes = -1;
+                }
+            }
+            _dev_mutex[_device_path].unlock();
 
-            ret = close(_fildes);
-            if (0 != ret)
-                throw linux_backend_exception(to_string() << "close(...) failed");
-
-            _fildes = -1;
+            if (!err_msg.empty())
+                throw linux_backend_exception(err_msg);
+            
         }
 
         static int xioctl(int fh, unsigned long request, void *arg)
@@ -269,11 +306,11 @@ namespace librealsense
             _must_enqueue = false;
         }
 
-        void buffer::request_next_frame(int fd)
+        void buffer::request_next_frame(int fd, bool force)
         {
             std::lock_guard<std::mutex> lock(_mutex);
 
-            if (_must_enqueue)
+            if (_must_enqueue || force)
             {
                 if (!_use_memory_map)
                 {
@@ -321,6 +358,8 @@ namespace librealsense
                 if (buf._data_buf && (buf._file_desc >= 0))
                     buf._data_buf->request_next_frame(buf._file_desc);
             };
+            _md_start = nullptr;
+            _md_size = 0;
         }
 
         void buffers_mgr::set_md_from_video_node(bool compressed)
@@ -357,6 +396,10 @@ namespace librealsense
                 }
             }
 
+            if (nullptr == md_start)
+            {
+                LOG_DEBUG("Could not parse metadata");
+            }
             set_md_attributes(static_cast<uint8_t>(md_size),md_start);
         }
 
@@ -369,6 +412,11 @@ namespace librealsense
                     return false;
                 }
             return true;
+        }
+
+        bool  buffers_mgr::md_node_present() const
+        {
+            return (buffers[e_metadata_buf]._file_desc > 0);
         }
 
         // retrieve the USB specification attributed to a specific USB device.
@@ -400,7 +448,7 @@ namespace librealsense
             // RAII to handle exceptions
             std::unique_ptr<int, std::function<void(int*)> > fd(
                         new int (open(dev_name.c_str(), O_RDWR | O_NONBLOCK, 0)),
-                        [](int* d){ if (d && (*d)) ::close(*d);});
+                        [](int* d){ if (d && (*d)) {::close(*d); } delete d; });
 
             if(*fd < 0)
                 throw linux_backend_exception(to_string() << __FUNCTION__ << ": Cannot open '" << dev_name);
@@ -634,7 +682,8 @@ namespace librealsense
               _named_mtx(nullptr),
               _use_memory_map(use_memory_map),
               _fd(-1),
-              _stop_pipe_fd{}
+              _stop_pipe_fd{},
+              _buf_dispatch(use_memory_map)
         {
             foreach_uvc_device([&info, this](const uvc_device_info& i, const std::string& name)
             {
@@ -823,6 +872,30 @@ namespace librealsense
             }
         }
 
+        std::string time_in_HH_MM_SS_MMM()
+        {
+            using namespace std::chrono;
+
+            // get current time
+            auto now = system_clock::now();
+
+            // get number of milliseconds for the current second
+            // (remainder after division into seconds)
+            auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+
+            // convert to std::time_t in order to convert to std::tm (broken time)
+            auto timer = system_clock::to_time_t(now);
+
+            // convert to broken time
+            std::tm bt = *std::localtime(&timer);
+
+            std::ostringstream oss;
+
+            oss << std::put_time(&bt, "%H:%M:%S"); // HH:MM:SS
+            oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
+            return oss.str();
+        }
+
         void v4l_uvc_device::poll()
         {
              fd_set fds{};
@@ -838,6 +911,10 @@ namespace librealsense
 
             struct timeval expiration_time = { mono_time.tv_sec + 5, mono_time.tv_nsec / 1000 };
             int val = 0;
+
+            auto realtime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            auto time_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            LOG_DEBUG_V4L("Select initiated at " << time_in_HH_MM_SS_MMM() << ", mono time " << time_since_epoch << ", host time " << realtime );
             do {
                 struct timeval remaining;
                 ret = clock_gettime(CLOCK_MONOTONIC, &mono_time);
@@ -850,12 +927,21 @@ namespace librealsense
                 }
                 else {
                     val = 0;
+                    LOG_DEBUG_V4L("Select timeouted");
                 }
+
+                if (val< 0)
+                    LOG_DEBUG_V4L("Select interrupted, val = " << val << ", error = " << errno);
             } while (val < 0 && errno == EINTR);
 
+            LOG_DEBUG_V4L("Select done, val = " << val << " at " << time_in_HH_MM_SS_MMM());
             if(val < 0)
             {
-                stop_data_capture();
+                _is_capturing = false;
+                _is_started = false;
+
+                // Notify kernel
+                streamoff();
             }
             else
             {
@@ -877,12 +963,46 @@ namespace librealsense
                     else // Check and acquire data buffers from kernel
                     {
                         bool md_extracted = false;
+                        bool keep_md = false;
+                        bool wa_applied = false;
                         buffers_mgr buf_mgr(_use_memory_map);
+                        if (_buf_dispatch.metadata_size())
+                        {
+                            buf_mgr = _buf_dispatch;    // Handle over MD buffer from the previous cycle
+                            md_extracted = true;
+                            wa_applied = true;
+                            _buf_dispatch.set_md_attributes(0,nullptr);
+                        }
                         // RAII to handle exceptions
                         std::unique_ptr<int, std::function<void(int*)> > md_poller(new int(0),
-                            [this,&buf_mgr,&md_extracted,&fds](int* d)
+                            [this,&buf_mgr,&md_extracted,&keep_md,&fds](int* d)
                             {
-                                if (!md_extracted) acquire_metadata(buf_mgr,fds);
+                                if (!md_extracted)
+                                {
+                                    LOG_DEBUG_V4L("MD Poller read md ");
+                                    acquire_metadata(buf_mgr,fds);
+                                    if (buf_mgr.metadata_size())
+                                    {
+                                        if (keep_md) // store internally for next poll cycle
+                                        {
+                                            auto fn = *(uint32_t*)((char*)(buf_mgr.metadata_start())+28);
+                                            auto mdb = buf_mgr.get_buffers().at(e_metadata_buf);
+                                            LOG_DEBUG_V4L("Poller stores buf for fd " << std::dec << mdb._file_desc
+                                                          << " ,seq = " << mdb._dq_buf.sequence << " v4l_buf " << mdb._dq_buf.index
+                                                          << " , metadata size = " << (int)buf_mgr.metadata_size()
+                                                          << ", fn = " << fn);
+                                            _buf_dispatch  = buf_mgr; // TODO keep metadata only as dispatch may hold video buf from previous cycle
+                                            buf_mgr.handle_buffer(e_metadata_buf,-1); // transfer new buffer request to next cycle
+                                        }
+                                        else // Discard collected metadata buffer
+                                        {
+                                            LOG_DEBUG_V4L("Discard md buffer");
+                                            auto md_buf = buf_mgr.get_buffers().at(e_metadata_buf);
+                                            if (md_buf._data_buf)
+                                                md_buf._data_buf->request_next_frame(md_buf._file_desc,true);
+                                        }
+                                    }
+                                }
                                 delete d;
                             });
 
@@ -895,10 +1015,6 @@ namespace librealsense
                             if(xioctl(_fd, VIDIOC_DQBUF, &buf) < 0)
                             {
                                 LOG_DEBUG_V4L("Dequeued empty buf for fd " << std::dec << _fd);
-                                if(errno == EAGAIN)
-                                    return;
-
-                                throw linux_backend_exception(to_string() << "xioctl(VIDIOC_DQBUF) failed for fd: " << _fd);
                             }
                             LOG_DEBUG_V4L("Dequeued buf " << std::dec << buf.index << " for fd " << _fd << " seq " << buf.sequence);
 
@@ -909,7 +1025,7 @@ namespace librealsense
                             {
                                 if(buf.bytesused == 0)
                                 {
-                                    LOG_INFO("Empty video frame arrived");
+                                    LOG_DEBUG_V4L("Empty video frame arrived, index " << buf.index);
                                     return;
                                 }
 
@@ -938,23 +1054,39 @@ namespace librealsense
                                             s << "overflow video frame detected!\nSize " << buf.bytesused
                                                 << ", payload size " << buffer->get_length_frame_only();
                                     }
+                                    LOG_WARNING("Incomplete frame received: " << s.str()); // Ev -try1
                                     librealsense::notification n = { RS2_NOTIFICATION_CATEGORY_FRAME_CORRUPTED, 0, RS2_LOG_SEVERITY_WARN, s.str()};
 
                                     _error_handler(n);
+                                    // Check if metadata was already allocated
+                                    if (buf_mgr.metadata_size())
+                                    {
+                                        LOG_WARNING("Metadata was present when partial frame arrived, mark md as extracted");
+                                        md_extracted = true;
+                                        LOG_DEBUG_V4L("Discarding md due to invalid video payload");
+                                        auto md_buf = buf_mgr.get_buffers().at(e_metadata_buf);
+                                        md_buf._data_buf->request_next_frame(md_buf._file_desc,true);
+                                    }
                                 }
                                 else
                                 {
                                     auto timestamp = (double)buf.timestamp.tv_sec*1000.f + (double)buf.timestamp.tv_usec/1000.f;
                                     timestamp = monotonic_to_realtime(timestamp);
 
-                                    // Read metadata. For metadata note performs a blocking call to ensure video and metadata sync
+                                    // Read metadata. Metadata node performs a blocking call to ensure video and metadata sync
                                     acquire_metadata(buf_mgr,fds,compressed_format);
                                     md_extracted = true;
 
-                                    //if (val > 1)
-                                    //    LOG_INFO("Frame buf ready, md size: " << std::dec << (int)buf_mgr.metadata_size() << " seq. id: " << buf.sequence);
-                                    frame_object fo{ std::min(buf.bytesused - buf_mgr.metadata_size(), buffer->get_length_frame_only()), buf_mgr.metadata_size(),
-                                        buffer->get_frame_start(), buf_mgr.metadata_start(), timestamp };
+                                    if (wa_applied)
+                                    {
+                                        auto fn = *(uint32_t*)((char*)(buf_mgr.metadata_start())+28);
+                                        LOG_DEBUG_V4L("Extracting md buff, fn = " << fn);
+                                    }
+
+                                    auto frame_sz = buf_mgr.md_node_present() ? buf.bytesused :
+                                                        std::min(buf.bytesused - buf_mgr.metadata_size(), buffer->get_length_frame_only());
+                                    frame_object fo{ frame_sz, buf_mgr.metadata_size(),
+                                                     buffer->get_frame_start(), buf_mgr.metadata_start(), timestamp };
 
                                     buffer->attach_buffer(buf);
                                     buf_mgr.handle_buffer(e_video_buf,-1); // transfer new buffer request to the frame callback
@@ -974,12 +1106,14 @@ namespace librealsense
                             }
                             else
                             {
-                                LOG_INFO("Video frame arrived in idle mode."); // TODO - verification
+                                LOG_DEBUG_V4L("Video frame arrived in idle mode."); // TODO - verification
                             }
                         }
                         else
                         {
-                            LOG_WARNING("FD_ISSET signal false - no data on video node sink");
+                            if (_is_started)
+                                keep_md = true;
+                            LOG_DEBUG("FD_ISSET: no data on video node sink");
                         }
                     }
                 }
@@ -1031,6 +1165,7 @@ namespace librealsense
         }
         bool v4l_uvc_device::get_xu(const extension_unit& xu, uint8_t control, uint8_t* data, int size) const
         {
+            memset(data, 0, size);
             uvc_xu_control_query q = {static_cast<uint8_t>(xu.unit), control, UVC_GET_CUR,
                                       static_cast<uint16_t>(size), const_cast<uint8_t *>(data)};
             if(xioctl(_fd, UVCIOC_CTRL_QUERY, &q) < 0)
@@ -1510,7 +1645,7 @@ namespace librealsense
             // 1. Obtain video node data.
             // 2. Obtain metadata
             //     To revert to multiplexing mode uncomment the next line
-            // _fds.push_back(_md_fd);
+            _fds.push_back(_md_fd);
             _max_fd = *std::max_element(_fds.begin(),_fds.end());
 
             v4l2_capability cap = {};
@@ -1590,14 +1725,17 @@ namespace librealsense
         // Retrieve metadata from a dedicated UVC node. For kernels 4.16+
         void v4l_uvc_meta_device::acquire_metadata(buffers_mgr & buf_mgr,fd_set &fds, bool)
         {
-            // Metadata is calculated once per frame
-            if (buf_mgr.metadata_size())
-                return;
-
-            //Use blocking metadata node polling. Uncomment the next lines to revert to multiplexing I/O mode
-            //if(FD_ISSET(_md_fd, &fds))
+            //Use non-blocking metadata node polling
+            if(FD_ISSET(_md_fd, &fds))
             {
-                //FD_CLR(_md_fd,&fds);
+                // In scenario if [md+vid] ->[md] ->[md,vid] the third md should not be retrieved but wait for next select
+                if (buf_mgr.metadata_size())
+                {
+                    LOG_WARNING("Metadata override requested but avoided skipped");
+                    return;
+                }
+                FD_CLR(_md_fd,&fds);
+
                 v4l2_buffer buf{};
                 buf.type = LOCAL_V4L2_BUF_TYPE_META_CAPTURE;
                 buf.memory = _use_memory_map ? V4L2_MEMORY_MMAP : V4L2_MEMORY_USERPTR;
@@ -1606,44 +1744,46 @@ namespace librealsense
                 if(xioctl(_md_fd, VIDIOC_DQBUF, &buf) < 0)
                 {
                     LOG_DEBUG_V4L("Dequeued empty buf for md fd " << std::dec << _md_fd);
-                    return;
-
-                    //throw linux_backend_exception(to_string() << "xioctl(VIDIOC_DQBUF) failed for metadata fd: " << _md_fd);
                 }
-                LOG_DEBUG_V4L("Dequeued md buf " << std::dec << buf.index << " for fd " << _md_fd << " seq " << buf.sequence);
+
+                //V4l debugging message
+                auto mdbuf = _md_buffers[buf.index]->get_frame_start();
+                auto hwts = *(uint32_t*)((mdbuf+2));
+                auto fn = *(uint32_t*)((mdbuf+38));
+                LOG_DEBUG_V4L("Dequeued md buf " << std::dec << buf.index << " for fd " << _md_fd << " seq " << buf.sequence
+                             << " fn " << fn << " hw ts " << hwts
+                              << " v4lbuf ts usec " << buf.timestamp.tv_usec);
 
                 auto buffer = _md_buffers[buf.index];
                 buf_mgr.handle_buffer(e_metadata_buf,_md_fd, buf,buffer);
 
-                if (_is_started)
+                if (!_is_started)
+                    LOG_INFO("Metadata frame arrived in idle mode.");
+
+                static const size_t uvc_md_start_offset = sizeof(uvc_meta_buffer::ns) + sizeof(uvc_meta_buffer::sof);
+
+                if (buf.bytesused > uvc_md_start_offset )
                 {
-                    static const size_t uvc_md_start_offset = sizeof(uvc_meta_buffer::ns) + sizeof(uvc_meta_buffer::sof);
+                    // The first uvc_md_start_offset bytes of metadata buffer are generated by host driver
+                    buf_mgr.set_md_attributes(buf.bytesused - uvc_md_start_offset,
+                                                buffer->get_frame_start() + uvc_md_start_offset);
 
-                    if (buf.bytesused > uvc_md_start_offset )
-                    {
-                        // The first uvc_md_start_offset bytes of metadata buffer are generated by host driver
-                        buf_mgr.set_md_attributes(buf.bytesused - uvc_md_start_offset,
-                                                    buffer->get_frame_start() + uvc_md_start_offset);
-
-                        buffer->attach_buffer(buf);
-                        buf_mgr.handle_buffer(e_metadata_buf,-1); // transfer new buffer request to the frame callback
-                    }
-                    else
-                    {
-                        // Zero-size buffers generate empty md. Non-zero partial bufs handled as errors
-                        if(buf.bytesused > 0)
-                        {
-                            std::stringstream s;
-                            s << "Invalid metadata payload, size " << buf.bytesused;
-                            LOG_WARNING(s.str());
-                            _error_handler({ RS2_NOTIFICATION_CATEGORY_FRAME_CORRUPTED, 0, RS2_LOG_SEVERITY_WARN, s.str()});
-                        }
-                    }
+                    buffer->attach_buffer(buf);
+                    buf_mgr.handle_buffer(e_metadata_buf,-1); // transfer new buffer request to the frame callback
                 }
                 else
                 {
-                    LOG_INFO("Metadata frame arrived in idle mode.");
+                    LOG_DEBUG_V4L("Invalid md size: bytes used =  " << buf.bytesused << " ,start offset=" << uvc_md_start_offset);
+                    // Zero-size buffers generate empty md. Non-zero partial bufs handled as errors
+                    if(buf.bytesused > 0)
+                    {
+                        std::stringstream s;
+                        s << "Invalid metadata payload, size " << buf.bytesused;
+                        LOG_WARNING(s.str());
+                        _error_handler({ RS2_NOTIFICATION_CATEGORY_FRAME_CORRUPTED, 0, RS2_LOG_SEVERITY_WARN, s.str()});
+                    }
                 }
+
             }
         }
 

@@ -1,23 +1,22 @@
 package com.intel.realsense.camera;
 
-import android.Manifest;
 import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.os.AsyncTask;
 import android.os.Bundle;
-import android.support.v4.app.ActivityCompat;
-import android.support.v4.content.ContextCompat;
-import android.support.v7.app.AlertDialog;
-import android.support.v7.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
 import android.util.Log;
 import android.util.Pair;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.ExpandableListView;
 import android.widget.ListView;
 import android.widget.Toast;
 
@@ -34,6 +33,7 @@ import com.intel.realsense.librealsense.Updatable;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -57,6 +57,7 @@ public class SettingsActivity extends AppCompatActivity {
     private static final int INDEX_FW_LOG = 6;
     private static final int INDEX_CREATE_FLASH_BACKUP = 7;
 
+
     private Device _device;
 
     private boolean areAdvancedFeaturesEnabled = false; // advanced features (fw logs, terminal etc.)
@@ -68,7 +69,7 @@ public class SettingsActivity extends AppCompatActivity {
         mContext = this;
 
         // Advanced features are enabled if xml files exists in the device.
-        String advancedFeaturesPath = FileUtilities.getExternalStorageDir() +
+        String advancedFeaturesPath = FileUtilities.getExternalStorageDir(mContext) +
                 File.separator +
                 getString(R.string.realsense_folder) +
                 File.separator +
@@ -91,7 +92,8 @@ public class SettingsActivity extends AppCompatActivity {
                 _device = devices.createDevice(0);
                 loadInfosList();
                 loadSettingsList(_device);
-                StreamProfileSelector[] profilesList = createSettingList(_device);
+                List<StreamProfileSelector> profilesList = createSettingList(_device);
+                RemoveUnsupportedProfiles(profilesList);
                 loadStreamList(_device, profilesList);
                 return;
             } catch(Exception e){
@@ -112,33 +114,47 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void loadInfosList() {
-        final ListView listview = findViewById(R.id.info_list_view);
         String appVersion = "Camera App Version: " + BuildConfig.VERSION_NAME;
         String lrsVersion = "LibRealSense Version: " + RsContext.getVersion();
 
-        final String[] info = { lrsVersion, appVersion};
-        final ArrayAdapter adapter = new ArrayAdapter<>(this, R.layout.files_list_view, info);
-        listview.setAdapter(adapter);
-        adapter.notifyDataSetChanged();
+        HashMap<String, List<String>> expandableListDetail = new HashMap<String, List<String>>();
+
+        List<String> info = new ArrayList<String>();
+        info.add(appVersion);
+        info.add(lrsVersion);
+
+        expandableListDetail.put("Software information", info);
+
+        ExpandableListView expandableListView = findViewById(R.id.info_ex_list_view);
+        List<String> expandableListTitle = new ArrayList<String>(expandableListDetail.keySet());
+        SettingsViewAdapter infoViewAdapter = new SettingsViewAdapter(this, expandableListTitle, expandableListDetail);
+        expandableListView.setAdapter(infoViewAdapter);
+        // Expand Software information by default
+        expandableListView.expandGroup(0);
     }
 
     private void loadSettingsList(final Device device){
-        final ListView listview = findViewById(R.id.settings_list_view);
 
         final Map<Integer,String> settingsMap = new TreeMap<>();
+
         settingsMap.put(INDEX_DEVICE_INFO,"Device info");
-        settingsMap.put(INDEX_ADVANCE_MODE,"Enable advanced mode");
+
+        if(device.supportsInfo(CameraInfo.ADVANCED_MODE)) {
+            if (device.isInAdvancedMode()) {
+                settingsMap.put(INDEX_ADVANCE_MODE, "Disable advanced mode");
+                settingsMap.put(INDEX_PRESETS, "Presets");
+            }
+            else {
+                settingsMap.put(INDEX_ADVANCE_MODE, "Enable advanced mode");
+            }
+        }
+
         if(device.is(Extension.UPDATABLE)){
             settingsMap.put(INDEX_UPDATE,"Firmware update");
             try(Updatable fwud = device.as(Extension.UPDATABLE)){
                 if(fwud != null && fwud.supportsInfo(CameraInfo.CAMERA_LOCKED) && fwud.getInfo(CameraInfo.CAMERA_LOCKED).equals("NO"))
                     settingsMap.put(INDEX_UPDATE_UNSIGNED,"Firmware update (unsigned)");
             }
-        }
-
-        if(device.supportsInfo(CameraInfo.ADVANCED_MODE) && device.isInAdvancedMode()){
-            settingsMap.put(INDEX_ADVANCE_MODE,"Disable advanced mode");
-            settingsMap.put(INDEX_PRESETS,"Presets");
         }
 
         if (areAdvancedFeaturesEnabled) {
@@ -153,17 +169,23 @@ public class SettingsActivity extends AppCompatActivity {
 
         final String[] settings = new String[settingsMap.values().size()];
         settingsMap.values().toArray(settings);
-        final ArrayAdapter adapter = new ArrayAdapter<>(this, R.layout.files_list_view, settings);
-        listview.setAdapter(adapter);
 
-        listview.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+        // Create expandable list view
+        ExpandableListView expandableListView = findViewById(R.id.settings_ex_list_view);
+        HashMap<String, List<String>> expandableListDetail = new HashMap<String, List<String>>();
+        List<String> settings_group = Arrays.asList(settings);
+        expandableListDetail.put("Device Settings",settings_group);
+        List<String> expandableListTitle = new ArrayList<String>(expandableListDetail.keySet());
+        SettingsViewAdapter deviceSettingsViewAdapter = new SettingsViewAdapter(this, expandableListTitle, expandableListDetail);
+        expandableListView.setAdapter(deviceSettingsViewAdapter);
+        expandableListView.setOnChildClickListener(new ExpandableListView.OnChildClickListener() {
 
             @Override
-            public void onItemClick(AdapterView<?> parent, final View view,
-                                    int position, long id) {
+            public boolean  onChildClick(ExpandableListView parent, View v,
+                                     int groupPosition, int childPosition, long id) {
                 Object[] keys = settingsMap.keySet().toArray();
 
-                switch ((int)keys[position]){
+                switch ((int)keys[childPosition]){
                     case INDEX_DEVICE_INFO: {
                         Intent intent = new Intent(SettingsActivity.this, InfoActivity.class);
                         startActivity(intent);
@@ -172,8 +194,9 @@ public class SettingsActivity extends AppCompatActivity {
                     case INDEX_ADVANCE_MODE: device.toggleAdvancedMode(!device.isInAdvancedMode());
                         break;
                     case INDEX_PRESETS: {
-                        Intent intent = new Intent(SettingsActivity.this, PresetsActivity.class);
-                        startActivity(intent);
+                        PresetsDialog cd = new PresetsDialog();
+                        cd.setCancelable(true);
+                        cd.show(getFragmentManager(), null);
                         break;
                     }
                     case INDEX_UPDATE: {
@@ -201,12 +224,13 @@ public class SettingsActivity extends AppCompatActivity {
                         break;
                     }
                     case INDEX_CREATE_FLASH_BACKUP: {
-                        new FlashBackupTask(device).execute();
+                        new FlashBackupTask(device, mContext).execute();
                         break;
                     }
                     default:
                         break;
                 }
+                return true;
             }
         });
     }
@@ -216,15 +240,17 @@ public class SettingsActivity extends AppCompatActivity {
         private ProgressDialog mProgressDialog;
         private Device mDevice;
         String mBackupFileName = "fwdump.bin";
+        private Context mContext;
 
-        public FlashBackupTask(Device mDevice) {
+        public FlashBackupTask(Device mDevice, Context context) {
             this.mDevice = mDevice;
+            this.mContext = context;
         }
 
         @Override
         protected Void doInBackground(Void... voids) {
             try(final Updatable upd = mDevice.as(Extension.UPDATABLE)){
-                FileUtilities.saveFileToExternalDir(mBackupFileName, upd.createFlashBackup());
+                FileUtilities.saveFileToExternalDir(mContext, mBackupFileName, upd.createFlashBackup());
                 return null;
             }
         }
@@ -251,7 +277,7 @@ public class SettingsActivity extends AppCompatActivity {
                 public void run() {
                     new AlertDialog.Builder(mContext)
                             .setTitle("Firmware Backup Success")
-                            .setMessage("Saved into: " + FileUtilities.getExternalStorageDir() + File.separator + mBackupFileName)
+                            .setMessage("Saved into: " + FileUtilities.getExternalStorageDir(mContext) + File.separator + mBackupFileName)
                             .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
@@ -294,13 +320,26 @@ public class SettingsActivity extends AppCompatActivity {
         return rv;
     }
 
-    private void loadStreamList(Device device, StreamProfileSelector[] lines){
-        if(device == null || lines == null)
+    private void loadStreamList(Device device, List<StreamProfileSelector> streamProfiles){
+        if(device == null || streamProfiles.size() == 0)
             return;
         if(!device.supportsInfo(CameraInfo.PRODUCT_ID))
             throw new RuntimeException("try to config unknown device");
+
+        StreamProfileSelector[] streamProfilesArray = streamProfiles.toArray(new StreamProfileSelector[streamProfiles.size()]);
+        List<String> settings_group = new ArrayList<String>();
+        for (int i = 0; i < streamProfilesArray.length ; i++) {
+            settings_group.add(streamProfilesArray[i].getName());
+        }
+        // Create expandable list view
+        ExpandableListView streamListView = findViewById(R.id.configuration_ex_list_view);
+        HashMap<String, List<String>> expandableListDetail = new HashMap<String, List<String>>();
+
+        expandableListDetail.put("Configuration:(default-disable all)",settings_group);
+        List<String> expandableListTitle = new ArrayList<String>(expandableListDetail.keySet());
+
         final String pid = device.getInfo(CameraInfo.PRODUCT_ID);
-        final StreamProfileAdapter adapter = new StreamProfileAdapter(this, lines, new StreamProfileAdapter.Listener() {
+        final StreamProfileAdapter adapter = new StreamProfileAdapter(this, expandableListTitle, expandableListDetail, streamProfilesArray, new StreamProfileAdapter.Listener() {
             @Override
             public void onCheckedChanged(StreamProfileSelector holder) {
                 SharedPreferences sharedPref = getSharedPreferences(getString(R.string.app_settings), Context.MODE_PRIVATE);
@@ -312,12 +351,11 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
-        ListView streamListView = findViewById(R.id.configuration_list_view);
         streamListView.setAdapter(adapter);
         adapter.notifyDataSetChanged();
     }
 
-    private StreamProfileSelector[] createSettingList(final Device device){
+    private List<StreamProfileSelector> createSettingList(final Device device){
         Map<Integer, List<StreamProfile>> profilesMap = createProfilesMap(device);
 
         SharedPreferences sharedPref = getSharedPreferences(getString(R.string.app_settings), Context.MODE_PRIVATE);
@@ -335,7 +373,22 @@ public class SettingsActivity extends AppCompatActivity {
 
         Collections.sort(lines);
 
-        return lines.toArray(new StreamProfileSelector[lines.size()]);
+        return lines;
+    }
+
+    private void RemoveUnsupportedProfiles(List<StreamProfileSelector> streamProfiles){
+        StreamProfileSelector confidenceProfile = null;
+        for (StreamProfileSelector streamProfile : streamProfiles){
+            if (streamProfile.getProfile().getType() == StreamType.CONFIDENCE){
+                confidenceProfile = streamProfile;
+                break;
+            }
+        }
+
+    // Confidence stream format is RAW8, and it is not supported for display.
+    // Its removal is necessary until format RAW8 display is enabled.
+        if (confidenceProfile != null)
+            streamProfiles.remove(confidenceProfile);
     }
 
     void toggleFwLogging(){

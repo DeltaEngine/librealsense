@@ -22,7 +22,7 @@ void output_model::thread_loop()
             dev_copy = devices;
         }
         if (enable_firmware_logs)
-            for (auto&& dev : devices)
+            for (auto&& dev : dev_copy)
             {
                 try
                 {
@@ -71,7 +71,9 @@ void output_model::thread_loop()
                                 for (auto& elem : message.data())
                                     ss << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(elem) << " ";
                                 add_log(message.get_severity(), __FILE__, 0, ss.str());
-                            }                            
+                            }
+                            if (!enable_firmware_logs && fwlogger.get_number_of_fw_logs() == 0)
+                                break;
                         }
                     }
                 }
@@ -81,7 +83,9 @@ void output_model::thread_loop()
                         to_string() << "Failed to fetch firmware logs: " << ex.what());
                 }
             }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // FW define the logs polling intervals to be no less than 100msec to cope with limited resources.
+        // At the same time 100 msec should guarantee no log drops
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
@@ -91,7 +95,7 @@ output_model::~output_model()
     fw_logger.join();
 }
 
-output_model::output_model() : fw_logger([this](){ thread_loop(); })
+output_model::output_model() : fw_logger([this](){ thread_loop(); }) , incoming_log_queue(100)
 {
     is_output_open = config_file::instance().get_or_default(
             configurations::viewer::output_open, false);
@@ -154,11 +158,11 @@ void output_model::open(ux_window& win)
 {
     is_output_open = true;
     config_file::instance().set(configurations::viewer::output_open, true);
-    default_log_h = (win.height() - 100) / 2;
+    default_log_h = static_cast<int>((win.height() - 100) / 2);
     new_log = true;
 }
 
-void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device> devices)
+void output_model::draw(ux_window& win, rect view_rect, device_models_list & device_models)
 {
     ImGui::PushStyleColor(ImGuiCol_FrameBg, scrollbar_bg);
 
@@ -215,8 +219,9 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
             ImGui::SetTooltip("%s", "Collapse Debug Console Window");
         }
 
-        if (default_log_h.value() != (win.height() - 100) / 2)
-            default_log_h = (win.height() - 100) / 2;
+        int h_val = (int)((win.height() - 100) / 2);
+        if (default_log_h.value() != h_val)
+            default_log_h = h_val;
     }
 
     ImGui::SameLine();
@@ -273,7 +278,7 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
     ImGui::SetCursorPosX(curr_x - 5);
 
 
-    int percent = total_frames ? 100 * ((double)number_of_drops / (total_frames)) : 0;
+    int percent = total_frames ? (int)(100 * ((double)number_of_drops / (total_frames))) : 0;
 
     std::stringstream ss;
     ss << u8"\uF043";
@@ -285,10 +290,10 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
     buff[search_line.size()] = 0;
 
     auto actual_search_width = w - size.x - 100 - curr_x;
-    if (focus_search) search_width = actual_search_width;
+    if (focus_search) search_width = (int)(actual_search_width);
 
     if (search_open && search_width.value() != actual_search_width)
-        search_width = actual_search_width;
+        search_width = (int)(actual_search_width);
 
     // if (is_output_open && search_width < 1)
     // {
@@ -299,7 +304,7 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
     {
         ImGui::PushFont(win.get_monofont());
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4);
-        ImGui::PushItemWidth(search_width);
+        ImGui::PushItemWidth(static_cast<float>(search_width));
         ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, regular_blue);
         if (ImGui::InputText("##SearchInLogs",buff, 1023))
         {
@@ -420,7 +425,7 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
             auto margin = ImGui::GetTextLineHeightWithSpacing() - ImGui::GetTextLineHeight();
             auto size = ImGui::CalcTextSize(line.c_str());
             
-            auto t = single_wave(time_now - log.time_added + 0.3f) * 0.2f;
+            auto t = single_wave(static_cast<float>(time_now - log.time_added + 0.3f)) * 0.2f;
             if (log.selected) t = 0.2f;
 
             auto pos = ImGui::GetCursorScreenPos();
@@ -515,7 +520,7 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
             if (commands_histroy.size())
             {
                 if (ImGui::IsKeyPressed(GLFW_KEY_UP)) history_offset = (history_offset + 1) % commands_histroy.size();
-                if (ImGui::IsKeyPressed(GLFW_KEY_DOWN)) history_offset = (history_offset - 1 + commands_histroy.size()) % commands_histroy.size();
+                if (ImGui::IsKeyPressed(GLFW_KEY_DOWN)) history_offset = (history_offset - 1 + (int)commands_histroy.size()) % commands_histroy.size();
                 command_line = commands_histroy[history_offset];
 
                 force_refresh = true;
@@ -583,7 +588,7 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
         {
             if (commands_histroy.size() > 100) commands_histroy.pop_back();
             commands_histroy.push_front(command_line);
-            run_command(command_line, devices);
+            run_command(command_line, device_models);
             command_line = "";
             command_focus = true;
         }
@@ -685,7 +690,9 @@ void output_model::draw(ux_window& win, rect view_rect, std::vector<rs2::device>
 
     {
         std::lock_guard<std::mutex> lock(devices_mutex);
-        this->devices = devices;
+        this->devices.clear();
+        for (auto && dev_model : device_models)
+            this->devices.push_back(dev_model->dev);
     }
 }
 
@@ -751,7 +758,7 @@ void output_model::add_log(rs2_log_severity severity, std::string filename, int 
     new_log = true;
 }
 
-void output_model::run_command(std::string command, std::vector<rs2::device> devices)
+void output_model::run_command(std::string command, device_models_list & device_models)
 {
     try
     {
@@ -771,7 +778,10 @@ void output_model::run_command(std::string command, std::vector<rs2::device> dev
             return;
         }
 
-        std::regex e("([0-9A-Fa-f]{2}\\s)+");
+        if( user_defined_command( command, device_models ) )
+            return;
+
+        std::regex e( "([0-9A-Fa-f]{2}\\s)+" );
 
         if (std::regex_match(command, e))
         {
@@ -863,9 +873,48 @@ void output_model::run_command(std::string command, std::vector<rs2::device> dev
     } 
     catch(const std::exception& ex)
     {
-        add_log(RS2_LOG_SEVERITY_ERROR, __FILE__, __LINE__, ex.what());
+        add_log( RS2_LOG_SEVERITY_ERROR, __FILE__, __LINE__, ex.what() );
     }
 }
+
+bool output_model::user_defined_command( std::string command, device_models_list & device_models )
+{
+    bool user_defined_command_detected = false;
+    bool user_defined_command_activated = false;
+
+    // If a known command is detected , it will treated as a user_defined_command and will not be
+    // passed to the FW commands check logic.
+    // Note: For now we find the first device that supports the command and activate the command only on it.
+
+    if( to_lower( command ) == "get-nest" )
+    {
+        user_defined_command_detected = true;
+
+        for( auto && dev : devices )
+        {
+            if( auto dbg = dev.as< rs2::debug_protocol >() )
+            {
+                 // Verify minimal version for handling this command
+                 std::vector< uint8_t > special_command
+                     = { 'G', 'E', 'T', '-', 'N', 'E', 'S', 'T' };
+                 auto res = dbg.send_and_receive_raw_data( special_command );
+                 user_defined_command_activated = true;
+            }
+        }
+    }
+
+    // Log a warning if a known command was not activated
+    if( user_defined_command_detected && ! user_defined_command_activated )
+    {
+        add_log( RS2_LOG_SEVERITY_WARN,
+                 __FILE__,
+                 __LINE__,
+                 to_string() << "None of the connected devices supports '" << command << "'" );
+    }
+
+    return user_defined_command_detected;
+}
+
 
 void output_model::update_dashboards(rs2::frame f)
 {
@@ -961,7 +1010,7 @@ void stream_dashboard::draw_dashboard(ux_window& win, rect& r)
     bool has_room = true;
     while (has_room)
     {
-        auto total = 0;
+        float total = 0;
         for (int i = 0; i <= ticks_x; i++)
         {
             auto x = min_x + i * (gap_x / ticks_x);
@@ -1021,7 +1070,7 @@ void frame_drops_dashboard::process_frame(rs2::frame f)
         {
             auto last = stream_to_time[f.get_profile().unique_id()];
 
-            auto fps = f.get_profile().fps();
+            long long fps = f.get_profile().fps();
 
             if (f.supports_frame_metadata(RS2_FRAME_METADATA_ACTUAL_FPS))
                 fps = f.get_frame_metadata(RS2_FRAME_METADATA_ACTUAL_FPS);
@@ -1053,7 +1102,7 @@ void frame_drops_dashboard::draw(ux_window& win, rect r)
     auto hist = read_shared_data<std::deque<int>>([&](){ return drops_history; });
     for (int i = 0; i < hist.size(); i++)
     {
-        add_point(i, hist[i]);
+        add_point((float)i, (float)hist[i]);
     }
     r.h -= ImGui::GetTextLineHeightWithSpacing() + 10;
     draw_dashboard(win, r);
@@ -1070,7 +1119,7 @@ void frame_drops_dashboard::draw(ux_window& win, rect r)
     methods.push_back("Camera Timestamp Rate");
 
     ImGui::PushItemWidth(r.w - 207);
-    if (ImGui::Combo("##fps_method", &method, methods.data(), methods.size()))
+    if (ImGui::Combo("##fps_method", &method, methods.data(), (int)(methods.size())))
     {
         clear(false);
     }
@@ -1079,7 +1128,7 @@ void frame_drops_dashboard::draw(ux_window& win, rect r)
 
 int frame_drops_dashboard::get_height() const 
 { 
-    return 160.f + ImGui::GetTextLineHeightWithSpacing(); 
+    return (int)(160 + ImGui::GetTextLineHeightWithSpacing());
 }
 
 void frame_drops_dashboard::clear(bool full) 

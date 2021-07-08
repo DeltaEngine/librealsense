@@ -1,5 +1,5 @@
 message(STATUS "Setting Windows configurations")
-
+cmake_minimum_required(VERSION 3.6.0) #Required by list(FILTER ...
 config_crt()
 
 macro(os_set_flags)
@@ -45,9 +45,9 @@ macro(os_set_flags)
     set(DOTNET_VERSION_LIBRARY "3.5" CACHE STRING ".Net Version, defaulting to '3.5', the Unity wrapper currently supports only .NET 3.5")
     set(DOTNET_VERSION_EXAMPLES "4.0" CACHE STRING ".Net Version, defaulting to '4.0'")
 
-    if(BUILD_EASYLOGGINGPP)
-        add_definitions(-DNOMINMAX)
-    endif()
+    # Windows.h will define the min/max macros which will 
+    # collide with std's min/max templates, which we want to use.
+    add_definitions(-DNOMINMAX)
 endmacro()
 
 macro(os_target_config)
@@ -89,3 +89,12 @@ macro(os_target_config)
         source_group("Source Files\\${_file_path_msvc}" FILES "${_relative_file}")
     endforeach()
 endmacro()
+
+#modify variable with prefix. Mimics list(TRANSFORM ... PREPEND introduced with cmake 3.12
+FUNCTION(PREPEND var prefix)
+   SET(listVar "")
+   FOREACH(f ${ARGN})
+      LIST(APPEND listVar "${prefix}/${f}")
+   ENDFOREACH(f)
+   SET(${var} "${listVar}" PARENT_SCOPE)
+ENDFUNCTION(PREPEND)

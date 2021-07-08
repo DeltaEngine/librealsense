@@ -29,7 +29,7 @@ namespace librealsense
         int auto_exposure;
         bool was_set = false;
     }auto_exposure_control;
- 
+
     typedef struct gain_control
     {
         float gain;
@@ -132,6 +132,7 @@ namespace librealsense
     };
 
     void default_400(preset& p);
+    void default_405u(preset& p);
     void default_405(preset& p);
     void default_410(preset& p);
     void default_420(preset& p);

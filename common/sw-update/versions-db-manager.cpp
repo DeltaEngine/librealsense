@@ -7,7 +7,7 @@
 
 #include "json.hpp"
 #include "versions-db-manager.h"
-#include "types.h"
+#include <types.h>
 
 namespace rs2
 {
@@ -38,13 +38,13 @@ namespace rs2
             "";
 #endif
 
-        bool versions_db_manager::query_versions(const std::string &device_name, component_part_type component, const update_policy_type policy, version& out_version)
+        query_status_type versions_db_manager::query_versions(const std::string &device_name, component_part_type component, const update_policy_type policy, version& out_version)
         {
             // Load server versions info on first access
             if (!init())
             {
                 out_version = 0;
-                return false;
+                return DB_LOAD_FAILURE;
             }
 
             std::string platform(PLATFORM);
@@ -52,7 +52,7 @@ namespace rs2
             std::string up_str(to_string(policy));
             std::string comp_str(to_string(component));
 
-            if (up_str.empty() || comp_str.empty()) return false;
+            if (up_str.empty() || comp_str.empty()) return NO_VERSION_FOUND;
 
             // Look for the required version
             auto res = std::find_if(_server_versions_vec.begin(), _server_versions_vec.end(),
@@ -65,17 +65,17 @@ namespace rs2
             {
                 auto version_str = (*res)["version"];
                 out_version = version(version_str);
-                return true;
+                return VERSION_FOUND;
             }
 
             out_version = 0;
-            return false; // Nothing found
+            return NO_VERSION_FOUND; // Nothing found
         }
 
         bool versions_db_manager::get_version_data_common(const component_part_type component, const version& version, const std::string& req_field, std::string& out)
         {
-            // Load server versions info on first access
-            if (!init()) return false;
+            // Check if server versions are loaded
+            if (!_server_versions_loaded) return false;
 
             std::string platform = PLATFORM;
 
@@ -87,7 +87,7 @@ namespace rs2
             auto res = std::find_if(_server_versions_vec.begin(), _server_versions_vec.end(),
                 [version, component_str, platform](std::unordered_map<std::string, std::string> version_map)
             {
-                return (versions_db_manager::version(version_map["version"]) == version && component_str == version_map["component"] && (platform == version_map["platform"] || version_map["platform"] == "*"));
+                return (sw_update::version(version_map["version"]) == version && component_str == version_map["component"] && (platform == version_map["platform"] || version_map["platform"] == "*"));
             });
 
             if (res != _server_versions_vec.end())
@@ -100,7 +100,7 @@ namespace rs2
         }
 
 
-        std::string versions_db_manager::to_string(const component_part_type& component) const
+        std::string to_string(const component_part_type& component)
         {
             switch (component)
             {
@@ -116,7 +116,7 @@ namespace rs2
             return "";
         }
 
-        std::string versions_db_manager::to_string(const update_policy_type& policy) const
+        std::string to_string(const update_policy_type& policy)
         {
 
             switch (policy)
@@ -132,7 +132,7 @@ namespace rs2
             return "";
         }
 
-        bool versions_db_manager::from_string(std::string component_str, component_part_type& component_val) const
+        bool from_string(const std::string &component_str, component_part_type& component_val)
         {
             static std::unordered_map<std::string, component_part_type> map =
             { {"LIBREALSENSE",LIBREALSENSE},
@@ -150,7 +150,7 @@ namespace rs2
             LOG_ERROR("Unknown component type: " + component_str);
             return false;
         }
-        bool versions_db_manager::from_string(std::string policy_str, update_policy_type& policy_val) const
+        bool from_string(const std::string &policy_str, update_policy_type& policy_val)
         {
             static std::unordered_map<std::string, update_policy_type> map =
             { {"EXPERIMENTAL",EXPERIMENTAL},
@@ -181,20 +181,22 @@ namespace rs2
                     server_data_retrieved = true;
                 }
             }
+#ifdef CHECK_FOR_UPDATES
             else
             {
                 // read from local file
-                std::ifstream file(_dev_info_url);
-                if (file.good())
-                {
-                    server_data_retrieved = true;
-                    ver_data << file.rdbuf();
-                }
-                else
-                {
-                    LOG_ERROR("Cannot open file: " + _dev_info_url);
-                }
+                 std::ifstream file(_dev_info_url);
+                 if (file.good())
+                 {
+                     server_data_retrieved = true;
+                     ver_data << file.rdbuf();
+                 }
+                 else
+                 {
+                     LOG_ERROR("Cannot open file: " + _dev_info_url);
+                 }
             }
+#endif
             return server_data_retrieved;
         }
 

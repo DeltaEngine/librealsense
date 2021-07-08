@@ -21,9 +21,17 @@
 
 #define ARCBALL_CAMERA_IMPLEMENTATION
 #include <arcball_camera.h>
+#include "../common/utilities/string/trim-newlines.h"
+#include "../common/utilities/imgui/wrap.h"
 
 namespace rs2
 {
+    template <typename T>
+    T non_negative(const T& input)
+    {
+        return std::max(static_cast<T>(0), input);
+    }
+
     // Allocates a frameset from points and texture frames
     frameset_allocator::frameset_allocator(viewer_model* viewer) : owner(viewer),
         filter([this](frame f, frame_source& s)
@@ -266,7 +274,7 @@ namespace rs2
 
                         for (auto& option : curr_exporter->second.options)
                         {
-                            exporter->set_option(option.first, option.second);
+                            exporter->set_option(option.first, static_cast<float>(option.second));
                         }
 
                         export_frame(fname, std::move(exporter), *not_model, data);
@@ -396,15 +404,16 @@ namespace rs2
             if (s.second.is_stream_visible() &&
                 s.second.profile.stream_type() == RS2_STREAM_DEPTH)
             {
+                auto stream_origin_iter = streams_origin.find(s.second.profile.unique_id());
                 if (selected_depth_source_uid == -1)
                 {
-                    if (streams_origin.find(s.second.profile.unique_id()) != streams_origin.end() &&
-                        streams.find(streams_origin[s.second.profile.unique_id()]) != streams.end())
+                    if ( stream_origin_iter != streams_origin.end() &&
+                        streams.find( stream_origin_iter->second ) != streams.end())
                     {
-                        selected_depth_source_uid = streams_origin[s.second.profile.unique_id()];
+                        selected_depth_source_uid = stream_origin_iter->second;
                     }   
                 }
-                if (streams_origin.find(s.second.profile.unique_id()) != streams_origin.end() && streams_origin[s.second.profile.unique_id()] == selected_depth_source_uid)
+                if ( stream_origin_iter != streams_origin.end() && stream_origin_iter->second == selected_depth_source_uid)
                 {
                     selected_depth_source = i;
                 }
@@ -434,30 +443,36 @@ namespace rs2
                  s.second.profile.stream_type() == RS2_STREAM_DEPTH ||
                  s.second.profile.stream_type() == RS2_STREAM_FISHEYE))
             {
-                if (selected_tex_source_uid == -1 && selected_depth_source_uid != -1)
+                auto profile_unique_id = s.second.profile.unique_id();
+                auto stream_origin_iter = streams_origin.find(profile_unique_id);
+                auto profile_found = stream_origin_iter != streams_origin.end();
+
+                if( selected_tex_source_uid == -1 && selected_depth_source_uid != -1 )
                 {
-                    if (streams_origin.find(s.second.profile.unique_id()) != streams_origin.end() &&
-                        streams.find(streams_origin[s.second.profile.unique_id()]) != streams.end())
+                    if( profile_found && streams.find(stream_origin_iter->second ) != streams.end() )
                     {
-                        selected_tex_source_uid = streams_origin[s.second.profile.unique_id()];
+                        selected_tex_source_uid = streams_origin[profile_unique_id];
                     }                         
                 }
-                if ((streams_origin.find(s.second.profile.unique_id()) != streams_origin.end() &&streams_origin[s.second.profile.unique_id()] == selected_tex_source_uid))
+                if( ( profile_found && stream_origin_iter->second == selected_tex_source_uid ) )
                 {
                     selected_tex_source = i;
                 }
 
-                // The texture source shall always refer to the raw (original) streams
-                tex_sources.push_back(streams_origin[s.second.profile.unique_id()]);
-                tex_profiles.push_back(s.second.profile);
+                if( profile_found )
+                {
+                    // The texture source shall always refer to the raw (original) streams
+                    tex_sources.push_back(streams_origin[profile_unique_id]);
+                    tex_profiles.push_back(s.second.profile);
 
-                auto dev_name = s.second.dev ? s.second.dev->dev.get_info(RS2_CAMERA_INFO_NAME) : "Unknown";
-                std::string stream_name = rs2_stream_to_string(s.second.profile.stream_type());
-                if (s.second.profile.stream_index())
-                    stream_name += "_" + std::to_string(s.second.profile.stream_index());
-                tex_sources_str.push_back(to_string() << dev_name << " " << stream_name);
+                    auto dev_name = s.second.dev ? s.second.dev->dev.get_info(RS2_CAMERA_INFO_NAME) : "Unknown";
+                    std::string stream_name = rs2_stream_to_string(s.second.profile.stream_type());
+                    if (s.second.profile.stream_index())
+                        stream_name += "_" + std::to_string(s.second.profile.stream_index());
+                    tex_sources_str.push_back(to_string() << dev_name << " " << stream_name);
 
-                i++;
+                    i++;
+                }
             }
         }
 
@@ -592,7 +607,10 @@ namespace rs2
                     {
                         if (selected)
                         {
-                            selected_depth_source_uid = streams_origin[s.second.profile.unique_id()];
+                            auto stream_origin_iter = streams_origin.find(s.second.profile.unique_id());
+
+                            if( stream_origin_iter != streams_origin.end() )
+                                selected_depth_source_uid = stream_origin_iter->second;
                         }
                     }
                     i++;
@@ -860,6 +878,17 @@ namespace rs2
 #endif
     }
 
+    // Hide options from both the DQT and Viewer applications
+    void viewer_model::hide_common_options()
+    {
+        _hidden_options.emplace(RS2_OPTION_STREAM_FILTER);
+        _hidden_options.emplace(RS2_OPTION_STREAM_FORMAT_FILTER);
+        _hidden_options.emplace(RS2_OPTION_STREAM_INDEX_FILTER);
+        _hidden_options.emplace(RS2_OPTION_FRAMES_QUEUE_SIZE);
+        _hidden_options.emplace(RS2_OPTION_SENSOR_MODE);
+        _hidden_options.emplace(RS2_OPTION_NOISE_ESTIMATION);
+    }
+
     void viewer_model::update_configuration()
     {
         rs2_error* e = nullptr;
@@ -898,11 +927,12 @@ namespace rs2
             configurations::performance::occlusion_invalidation, true);
 
         ground_truth_r = config_file::instance().get_or_default(
-            configurations::viewer::ground_truth_r, 2500);
+            configurations::viewer::ground_truth_r, 1200);
 
         selected_shader = (shader_type)config_file::instance().get_or_default(
             configurations::viewer::shading_mode, 2);
 
+#ifdef BUILD_EASYLOGGINGPP
         auto min_severity = (rs2_log_severity)config_file::instance().get_or_default(
             configurations::viewer::log_severity, 2);
 
@@ -919,6 +949,7 @@ namespace rs2
 
             rs2::log_to_file(min_severity, filename.c_str());
         }
+#endif
 
         show_skybox = config_file::instance().get_or_default(
             configurations::performance::show_skybox, true);
@@ -926,12 +957,14 @@ namespace rs2
 
   
 
-    viewer_model::viewer_model(context &ctx_)
-            : ppf(*this),
-              ctx(ctx_),
-              frameset_alloc(this),
-              synchronization_enable(true),
-              zo_sensors(0)
+    viewer_model::viewer_model( context & ctx_ )
+        : ppf( *this )
+        , ctx( ctx_ )
+        , frameset_alloc( this )
+        , synchronization_enable( true )
+        , synchronization_enable_prev_state(true)
+        , zo_sensors( 0 )
+        , _support_ir_reflectivity( false )
     {
 
         syncer = std::make_shared<syncer_model>();
@@ -945,6 +978,8 @@ namespace rs2
         check_permissions();
         export_model exp_model = export_model::make_exporter("PLY", ".ply", "Polygon File Format (PLY)\0*.ply\0");
         exporters.insert(std::pair<export_type, export_model>(export_type::ply, exp_model));
+
+        hide_common_options(); // hide this options from both Viewer and DQT applications
     }
 
     void viewer_model::gc_streams()
@@ -965,9 +1000,16 @@ namespace rs2
         }
         for (auto&& i : streams_to_remove) {
             if(selected_depth_source_uid == i)
+            {
+                last_points = points();
                 selected_depth_source_uid = -1;
-            if(selected_tex_source_uid == i)
+            }
+
+            if (selected_tex_source_uid == i)
+            {
+                last_texture.reset();
                 selected_tex_source_uid = -1;
+            }
             streams.erase(i);
 
             if(ppf.frames_queue.find(i) != ppf.frames_queue.end())
@@ -975,6 +1017,11 @@ namespace rs2
                 ppf.frames_queue.erase(i);
             }
         }
+    }
+
+    bool rs2::viewer_model::is_option_skipped(rs2_option opt) const
+    {
+        return (_hidden_options.find(opt) != _hidden_options.end());
     }
 
     void rs2::viewer_model::show_popup(const ux_window& window, const popup& p)
@@ -1040,9 +1087,24 @@ namespace rs2
         auto custom_command = [&]()
         {
             auto msg = _active_popups.front().message;
+
+            // Wrap the text to feet the error pop-up window
+            std::string wrapped_msg;
+            try
+            {
+                auto trimmed_msg = utilities::string::trim_newlines(msg);  
+                wrapped_msg = utilities::imgui::wrap(trimmed_msg, 500);
+            }
+            catch (...)
+            {
+                wrapped_msg = msg; // Revert to original text on wrapping failure
+                not_model->output.add_log(RS2_LOG_SEVERITY_WARN, __FILE__, __LINE__,
+                    to_string() << "Wrapping of error message text failed!");
+            }
+
             ImGui::Text("RealSense error calling:");
             ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, regular_blue);
-            ImGui::InputTextMultiline("##error", const_cast<char*>(msg.c_str()),
+            ImGui::InputTextMultiline("##error", const_cast<char*>(wrapped_msg.c_str()),
                 msg.size() + 1, { 500,95 }, ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
             ImGui::PopStyleColor();
 
@@ -1147,7 +1209,7 @@ namespace rs2
 
     void viewer_model::show_rendering_not_supported(ImFont* font_18, int min_x, int min_y, int max_x, int max_y, rs2_format format)
     {
-        static periodic_timer update_string(std::chrono::milliseconds(200));
+        static utilities::time::periodic_timer update_string(std::chrono::milliseconds(200));
         static int counter = 0;
         static std::string to_print;
         auto pos = ImGui::GetCursorScreenPos();
@@ -1283,6 +1345,7 @@ namespace rs2
         std::shared_ptr<texture_buffer> texture_frame = nullptr;
         points p;
         frame f{};
+        gc_streams();
 
         std::map<int, frame> last_frames;
         try
@@ -1290,47 +1353,77 @@ namespace rs2
             size_t index = 0;
             while (ppf.resulting_queue.poll_for_frame(&f) && ++index < ppf.resulting_queue_max_size)
             {
-                last_frames[f.get_profile().unique_id()] = f;
+                // Open the frame-set and validate the incoming frame originated from one of the source streams
+                // and save the frames on last_frames 
+                // if one of the streams is missing we will use the last frame arrived
+                // point cloud is not a stream type yet it's a frame we want to display
+                if (f.is<rs2::frameset>())
+                {
+                    for (auto frame : f.as<rs2::frameset>())
+                    {
+                        auto profile_id = frame.get_profile().unique_id();
+
+                        if (frame.is< points >() || streams.find(profile_id) != streams.end())
+                        {
+                            last_frames[profile_id] = frame;
+                            continue;
+                        }
+
+                        auto stream_origin_iter = streams_origin.find(profile_id);
+                        if( (stream_origin_iter != streams_origin.end() && streams.find( stream_origin_iter->second ) != streams.end() ))
+                        {
+                            last_frames[ profile_id ] = frame;
+                        }
+                    }
+                }
+                else
+                {
+                    auto profile_id = f.get_profile().unique_id();
+
+                    if (f.is< points >() || streams.find(profile_id) != streams.end())
+                    {
+                        last_frames[profile_id] = f;
+                        continue;
+                    }
+
+                    auto stream_origin_iter = streams_origin.find(profile_id);
+                    if ((stream_origin_iter != streams_origin.end() && streams.find(stream_origin_iter->second) != streams.end()))
+                    {
+                        last_frames[profile_id] = f;
+                    }
+                }
             }
 
             for(auto&& f : last_frames)
                 not_model->output.update_dashboards(f.second);
 
-            for(auto&& frame : last_frames)
+            for( auto && frame : last_frames )
             {
                 auto f = frame.second;
-                frameset frames;
-                if ((frames = f.as<frameset>()))
+
+                if( f.is< points >()
+                    && ! paused )  // find and store the 3d points frame for later use
                 {
-                    for (auto&& frame : frames)
+                    p = f.as< points >();
+                    continue;
+                }
+
+                if( f.is< pose_frame >() )  // Aggregate the trajectory in pause mode to make the
+                                            // path consistent
+                {
+                    auto dev = streams[f.get_profile().unique_id()].dev;
+                    if( dev )
                     {
-                        if (frame.is<points>() && !paused)  // find and store the 3d points frame for later use
-                        {
-                            p = frame.as<points>();
-                            continue;
-                        }
-
-                        if (frame.is<pose_frame>())  // Aggregate the trajectory in pause mode to make the path consistent
-                        {
-                            auto dev = streams[frame.get_profile().unique_id()].dev;
-                            if (dev)
-                            {
-                                dev->tm2.update_model_trajectory(frame.as<pose_frame>(), !paused);
-                            }
-                        }
-
-                        auto texture = upload_frame(std::move(frame));
-
-                        if ((selected_tex_source_uid == -1 && frame.get_profile().format() == RS2_FORMAT_Z16) ||
-                            (frame.get_profile().format() != RS2_FORMAT_ANY && is_3d_texture_source(frame)))
-                        {
-                            texture_frame = texture;
-                        }
+                        dev->tm2.update_model_trajectory( f.as< pose_frame >(), ! paused );
                     }
                 }
-                else if (!p)
+
+                auto texture = upload_frame( std::move( f ) );
+
+                if( ( selected_tex_source_uid == -1 && f.get_profile().format() == RS2_FORMAT_Z16 )
+                    || ( f.get_profile().format() != RS2_FORMAT_ANY && is_3d_texture_source( f ) ) )
                 {
-                    upload_frame(std::move(f));
+                    texture_frame = texture;
                 }
             }
         }
@@ -1342,9 +1435,6 @@ namespace rs2
         {
             error_message = ex.what();
         }
-
-
-        gc_streams();
 
         window.begin_viewport();
 
@@ -1361,11 +1451,23 @@ namespace rs2
 
         ImGui::Begin("Viewport", nullptr, { viewer_rect.w, viewer_rect.h }, 0.f, flags);
 
-        draw_viewport(viewer_rect, window, devices, error_message, texture_frame, p);
+        try
+        {
+            draw_viewport( viewer_rect, window, devices, error_message, texture_frame, p );
 
-        not_model->draw(window, 
-            static_cast<int>(window.width()), static_cast<int>(window.height()),
-            error_message);
+            modal_notification_on = not_model->draw( window,
+                                                     static_cast< int >( window.width() ),
+                                                     static_cast< int >( window.height() ),
+                                                     error_message );
+        }
+        catch( const error & e )
+        {
+            error_message = error_to_string( e );
+        }
+        catch( const std::exception & e )
+        {
+            error_message = e.what();
+        }
 
         popup_if_error(window, error_message);
 
@@ -1574,7 +1676,7 @@ namespace rs2
         float inverse = 1.f / distances.size();
         for (auto elem : distances)
         {
-            e += pow(elem - mean, 2);
+            e += static_cast<float>(pow(elem - mean, 2));
         }
 
         auto standard_deviation = sqrt(inverse * e);
@@ -1587,7 +1689,7 @@ namespace rs2
         ImFont *font1, ImFont *font2, size_t dev_model_num,
         const mouse_info &mouse, std::string& error_message)
     {
-        static periodic_timer every_sec(std::chrono::seconds(1));
+        static utilities::time::periodic_timer every_sec(std::chrono::seconds(1));
         static bool icon_visible = false;
         if (every_sec) icon_visible = !icon_visible;
         float alpha = icon_visible ? 1.f : 0.2f;
@@ -1603,7 +1705,6 @@ namespace rs2
         {
             show_no_stream_overlay(font2, static_cast<int>(view_rect.x), static_cast<int>(view_rect.y), static_cast<int>(win.width()), static_cast<int>(win.height() - output_height));
         }
-
         for (auto &&kvp : layout)
         {
             auto&& view_rect = kvp.second;
@@ -1630,7 +1731,8 @@ namespace rs2
             }
 
             stream_mv.show_stream_header(font1, stream_rect, *this);
-            stream_mv.show_stream_footer(font1, stream_rect, mouse, *this);
+            stream_mv.show_stream_footer(font1, stream_rect, mouse, streams, *this);
+            
 
             if (val_in_range(stream_mv.profile.format(), { RS2_FORMAT_RAW10 , RS2_FORMAT_RAW16, RS2_FORMAT_MJPEG }))
             {
@@ -1881,8 +1983,8 @@ namespace rs2
 
         auto bottom_y = win.framebuf_height() - viewer_rect.y - viewer_rect.h;
         
-        glViewport(static_cast<GLint>(viewer_rect.x), static_cast<GLint>(bottom_y),
-            static_cast<GLsizei>(viewer_rect.w), static_cast<GLsizei>(viewer_rect.h - top_bar_height));
+        glViewport(static_cast<GLint>(non_negative(viewer_rect.x)), static_cast<GLint>(non_negative(bottom_y)),
+            static_cast<GLsizei>(non_negative(viewer_rect.w)), static_cast<GLsizei>(non_negative(viewer_rect.h - top_bar_height)));
 
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1891,7 +1993,7 @@ namespace rs2
 
         glMatrixMode(GL_PROJECTION);
         glPushMatrix();
-        gluPerspective(45, viewer_rect.w / win.framebuf_height(), 0.001f, 100.0f);
+        gluPerspective(45, non_negative(viewer_rect.w / win.framebuf_height()), 0.001f, 100.0f);
         matrix4 perspective_mat;
         glGetFloatv(GL_PROJECTION_MATRIX, perspective_mat);
         glPopMatrix();
@@ -2454,14 +2556,15 @@ namespace rs2
 
                 ImGui::PushStyleColor(ImGuiCol_Text, tab != 3 ? light_grey : light_blue);
                 ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, tab != 3 ? light_grey : light_blue);
+
                 if (ImGui::Button("Updates", { 120, 30 }))
                 {
                     tab = 3;
                     config_file::instance().set(configurations::viewer::settings_tab, tab);
                     temp_cfg.set(configurations::viewer::settings_tab, tab);
                 }
-                ImGui::PopStyleColor(2);
 
+                ImGui::PopStyleColor(2);
                 ImGui::PopFont();
                 ImGui::PopStyleColor(2); // button color
 
@@ -2775,7 +2878,9 @@ namespace rs2
                     {
                         ImGui::SetTooltip("%s", "When firmware of the device is below the version bundled with this software release\nsuggest firmware update");
                     }
+#ifdef CHECK_FOR_UPDATES 
                     ImGui::Separator();
+
                     ImGui::Text("%s", "SW/FW Updates From Server:");
                     if (ImGui::IsItemHovered())
                     {
@@ -2798,6 +2903,11 @@ namespace rs2
                     {
                         official_url = false;
                     }
+                    if (ImGui::IsItemHovered())
+                    {
+                        ImGui::SetTooltip("%s", "Add file:// prefix to use a local DB file ");
+                    }
+
                     if (!official_url)
                     {
                         if (ImGui::InputText("##custom_server_url", custom_url, 255))
@@ -2811,6 +2921,7 @@ namespace rs2
                             temp_cfg.set(configurations::update::sw_updates_official_server, false);
                         }
                     }
+#endif
                 }
 
                 ImGui::Separator();
@@ -2926,6 +3037,14 @@ namespace rs2
                 
                 ImGui::Text("Copyright 2018 Intel Corporation.");
 
+                if( RS2_API_BUILD_VERSION )
+                {
+                    ImGui::Text( "---" );
+                    ImGui::Text( "Full version: " );
+                    ImGui::SameLine();
+                    ImGui::Text( RS2_API_FULL_VERSION_STR );
+                }
+
                 ImGui::PushStyleColor(ImGuiCol_Button, sensor_bg);
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, sensor_bg);
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, sensor_bg);
@@ -3038,12 +3157,30 @@ namespace rs2
             // This can work poorly when the app FPS is really terrible (< 10)
             // but overall works resonably well
             const auto MAX_MOUSE_JUMP = 200;
+            const auto SCROLL_SLOW_MAX_TIME_MS = 50;
+            const auto SCROLL_FAST_MIN_TIME_MS = 500;
+            float zoom_per_tick = 0.2f;
+            static auto prev_scroll_time = std::chrono::high_resolution_clock::now();
+            if (mouse.mouse_wheel != 0)
+            {
+                auto scroll_time = std::chrono::high_resolution_clock::now();
+                auto delta_scroll_time = std::chrono::duration_cast<std::chrono::milliseconds>(scroll_time - prev_scroll_time).count();
+                prev_scroll_time = scroll_time;
+
+                // scrolling impact is scaled up / down if the scrolling speed is fast / slow
+                if (delta_scroll_time < SCROLL_SLOW_MAX_TIME_MS)
+                    zoom_per_tick *= 2.f;
+                else if (delta_scroll_time > SCROLL_FAST_MIN_TIME_MS)
+                    zoom_per_tick *= 0.5f;
+            }
+            
+            
             if (std::abs(cx - px) < MAX_MOUSE_JUMP && 
                 std::abs(cy - py) < MAX_MOUSE_JUMP )
                 arcball_camera_update(
                 (float*)&pos, (float*)&target, (float*)&up, view,
                 sec_since_update,
-                0.2f, // zoom per tick
+                zoom_per_tick,
                 -0.1f, // pan speed
                 3.0f, // rotation multiplier
                 static_cast<int>(viewer_rect.w), static_cast<int>(viewer_rect.h), // screen (window) size
@@ -3128,15 +3265,15 @@ namespace rs2
     {
         // Starting post processing filter rendering thread
         ppf.start();
-        streams[p.unique_id()].begin_stream(d, p);
+        streams[p.unique_id()].begin_stream(d, p, *this);
         ppf.frames_queue.emplace(p.unique_id(), rs2::frame_queue(5));
     }
 
-    bool viewer_model::is_3d_texture_source(frame f)
+    bool viewer_model::is_3d_texture_source(frame f) const
     {
         auto profile = f.get_profile().as<video_stream_profile>();
         auto index = profile.unique_id();
-        auto mapped_index = streams_origin[index];
+        auto mapped_index = streams_origin.at(index);
 
         if (!is_rasterizeable(profile.format()))
             return false;
@@ -3209,8 +3346,9 @@ namespace rs2
         auto index = f.get_profile().unique_id();
 
         std::lock_guard<std::mutex> lock(streams_mutex);
-        if (streams.find(streams_origin[index]) != streams.end())
-            return streams[streams_origin[index]].upload_frame(std::move(f));
+        auto stream_origin_iter = streams_origin.find(index);
+        if ( stream_origin_iter != streams_origin.end() && streams.find( stream_origin_iter->second ) != streams.end())
+            return streams[stream_origin_iter->second].upload_frame(std::move(f));
         else return nullptr;
     }
 
@@ -3218,7 +3356,8 @@ namespace rs2
         ux_window& window, int devices, std::string& error_message, 
         std::shared_ptr<texture_buffer> texture, points points)
     {
-        updates->draw(window, error_message);
+        if (!modal_notification_on)
+            updates->draw(not_model, window, error_message);
 
         static bool first = true;
         if (first)

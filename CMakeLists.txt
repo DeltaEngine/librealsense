@@ -55,6 +55,7 @@ set_target_properties(${LRS_TARGET} PROPERTIES VERSION ${REALSENSE_VERSION_STRIN
 include(include/CMakeLists.txt)
 include(src/CMakeLists.txt)
 include(third-party/CMakeLists.txt)
+include(common/utilities/CMakeLists.txt)
 
 # configure the project according to OS specific requirments
 # macro definition located at "CMake/<OS>_config.cmake"
@@ -81,9 +82,11 @@ endif()
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
     add_subdirectory(tools)
+elseif(BUILD_TOOLS)
+    add_subdirectory(tools)
 endif()
 
-if(BUILD_UNIT_TESTS)
+if(BUILD_UNIT_TESTS OR BUILD_LEGACY_LIVE_TEST)
     add_subdirectory(unit-tests)
 endif()
 

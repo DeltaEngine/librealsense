@@ -4,11 +4,13 @@
 #include "l500-color.h"
 
 #include <cstddef>
+#include <mutex>
+
+
 
 #include "l500-private.h"
 #include "proc/color-formats-converter.h"
-#include "ac-trigger.h"
-#include "algo/depth-to-rgb-calibration/debug.h"
+#include "algo/thermal-loop/l500-thermal-loop.h"
 
 
 namespace librealsense
@@ -41,27 +43,10 @@ namespace librealsense
         color_ep->register_info(RS2_CAMERA_INFO_PHYSICAL_PORT, color_devices_info.front().device_path);
 
         // processing blocks
-        if( _autocal )
-        {
-            color_ep->register_processing_block(
-                processing_block_factory::create_pbf_vector< yuy2_converter >(
-                    RS2_FORMAT_YUYV,                                                      // from
-                    map_supported_color_formats( RS2_FORMAT_YUYV ), RS2_STREAM_COLOR,     // to
-                    [=]( std::shared_ptr< generic_processing_block > pb )
-                    {
-                        auto cpb = std::make_shared< composite_processing_block >();
-                        cpb->add(std::make_shared< ac_trigger::color_processing_block >(_autocal));
-                        cpb->add( pb );
-                        return cpb;
-                    } ) );
-        }
-        else
-        {
-            color_ep->register_processing_block(
-                processing_block_factory::create_pbf_vector< yuy2_converter >(
-                    RS2_FORMAT_YUYV,                                                      // from
-                    map_supported_color_formats( RS2_FORMAT_YUYV ), RS2_STREAM_COLOR ) ); // to
-        }
+        color_ep->register_processing_block(
+            processing_block_factory::create_pbf_vector< yuy2_converter >(
+                RS2_FORMAT_YUYV,                                                      // from
+                map_supported_color_formats( RS2_FORMAT_YUYV ), RS2_STREAM_COLOR ) ); // to
 
         // options
         color_ep->register_option(RS2_OPTION_GLOBAL_TIME_ENABLED, enable_global_time_option);
@@ -102,6 +87,24 @@ namespace librealsense
                 { 2.f, "60Hz" },
                 { 3.f, "Auto" }, }));
 
+
+        // option to enable workaround for help weak usb hosts to support L515 devices
+        // with improved performance and stability
+        if(_fw_version >= firmware_version( "1.5.1.0" ) )
+        {
+            rs2_host_perf_mode launch_perf_mode = RS2_HOST_PERF_DEFAULT;
+
+#ifdef __ANDROID__
+            // android devices most likely low power low performance host
+            launch_perf_mode = RS2_HOST_PERF_LOW;
+#else
+            // other hosts use default settings from firmware, user still have the option to change later after launch
+            launch_perf_mode = RS2_HOST_PERF_DEFAULT;
+#endif
+
+            color_ep->register_option(RS2_OPTION_HOST_PERFORMANCE, std::make_shared<librealsense::float_option_with_description<rs2_host_perf_mode>>(option_range{ RS2_HOST_PERF_DEFAULT, RS2_HOST_PERF_COUNT - 1, 1, (float) launch_perf_mode }, "Optimize based on host performance, low power low performance host or high power high performance host"));
+        }
+
         // metadata
         // attributes of md_capture_timing
         auto md_prop_offset = offsetof(metadata_raw, mode) +
@@ -125,14 +128,22 @@ namespace librealsense
         color_ep->register_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE, make_attribute_parser(&md_rgb_control::manual_exp, md_rgb_control_attributes::manual_exp_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_AUTO_EXPOSURE, make_attribute_parser(&md_rgb_control::ae_mode, md_rgb_control_attributes::ae_mode_attribute, md_prop_offset,
             [](rs2_metadata_type param) { return (param != 1); }));
-        color_ep->register_metadata(RS2_FRAME_METADATA_BRIGHTNESS, make_attribute_parser(&md_rgb_control::brightness, md_rgb_control_attributes::brightness_attribute, md_prop_offset));
+        color_ep->register_metadata(RS2_FRAME_METADATA_BRIGHTNESS, make_attribute_parser(&md_rgb_control::brightness, md_rgb_control_attributes::brightness_attribute, md_prop_offset,
+                [](const rs2_metadata_type& param) {
+                    // cast to short in order to return negative values
+                    return *(short*)&(param);
+                }));
         color_ep->register_metadata(RS2_FRAME_METADATA_CONTRAST, make_attribute_parser(&md_rgb_control::contrast, md_rgb_control_attributes::contrast_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_SATURATION, make_attribute_parser(&md_rgb_control::saturation, md_rgb_control_attributes::saturation_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_SHARPNESS, make_attribute_parser(&md_rgb_control::sharpness, md_rgb_control_attributes::sharpness_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_AUTO_WHITE_BALANCE_TEMPERATURE, make_attribute_parser(&md_rgb_control::awb_temp, md_rgb_control_attributes::awb_temp_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_BACKLIGHT_COMPENSATION, make_attribute_parser(&md_rgb_control::backlight_comp, md_rgb_control_attributes::backlight_comp_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_GAMMA, make_attribute_parser(&md_rgb_control::gamma, md_rgb_control_attributes::gamma_attribute, md_prop_offset));
-        color_ep->register_metadata(RS2_FRAME_METADATA_HUE, make_attribute_parser(&md_rgb_control::hue, md_rgb_control_attributes::hue_attribute, md_prop_offset));
+        color_ep->register_metadata(RS2_FRAME_METADATA_HUE, make_attribute_parser(&md_rgb_control::hue, md_rgb_control_attributes::hue_attribute, md_prop_offset,
+            [](const rs2_metadata_type& param) {
+                // cast to short in order to return negative values
+                return *(short*)&(param);
+            }));
         color_ep->register_metadata(RS2_FRAME_METADATA_MANUAL_WHITE_BALANCE, make_attribute_parser(&md_rgb_control::manual_wb, md_rgb_control_attributes::manual_wb_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_POWER_LINE_FREQUENCY, make_attribute_parser(&md_rgb_control::power_line_frequency, md_rgb_control_attributes::power_line_frequency_attribute, md_prop_offset));
         color_ep->register_metadata(RS2_FRAME_METADATA_LOW_LIGHT_COMPENSATION, make_attribute_parser(&md_rgb_control::low_light_comp, md_rgb_control_attributes::low_light_comp_attribute, md_prop_offset));
@@ -151,7 +162,7 @@ namespace librealsense
             throw invalid_value_exception(to_string() << "L500 with RGB models are expected to include a single color device! - "
                 << color_devs_info.size() << " found");
 
-        _color_intrinsics_table_raw = [this]() { return get_raw_intrinsics_table(); };
+        _color_intrinsics_table = [this]() { return read_intrinsics_table(); };
         _color_extrinsics_table_raw = [this]() { return get_raw_extrinsics_table(); };
 
         // This lazy instance will get shared between all the extrinsics edges. If you ever need to override
@@ -164,8 +175,28 @@ namespace librealsense
                 return get_color_stream_extrinsic(*_color_extrinsics_table_raw);
             } );
         environment::get_instance().get_extrinsics_graph().register_extrinsics(*_depth_stream, *_color_stream, _color_extrinsic);
-        register_stream_to_extrinsic_group(*_depth_stream, 0);
+        register_stream_to_extrinsic_group(*_color_stream, 0);
 
+        _thermal_table = [this]() {
+
+            hwmon_response response;
+            auto data = read_fw_table_raw( *_hw_monitor,
+                                           algo::thermal_loop::l500::thermal_calibration_table::id,
+                                           response );
+            if( response != hwm_Success )
+            {
+                LOG_WARNING( "Failed to read FW table 0x"
+                             << std::hex
+                             << algo::thermal_loop::l500::thermal_calibration_table::id );
+                throw invalid_value_exception(
+                    to_string() << "Failed to read FW table 0x" << std::hex
+                                << algo::thermal_loop::l500::thermal_calibration_table::id );
+            }
+
+            if( data.size() > sizeof( table_header ))
+                data.erase( data.begin(), data.begin() + sizeof( table_header ) );
+            return algo::thermal_loop::l500::thermal_calibration_table{ data };
+        };
 
         _color_device_idx = add_sensor(create_color_device(ctx, color_devs_info));
     }
@@ -176,18 +207,19 @@ namespace librealsense
     }
 
 
-    rs2_intrinsics l500_color_sensor::get_intrinsics( const stream_profile& profile ) const
+    rs2_intrinsics l500_color_sensor::get_raw_intrinsics( uint32_t const width,
+                                                          uint32_t const height ) const
     {
         using namespace ivcam2;
 
-        auto intrinsic = check_calib<intrinsic_rgb>( *_owner->_color_intrinsics_table_raw );
+        auto & intrinsic = *_owner->_color_intrinsics_table;
 
-        auto num_of_res = intrinsic->resolution.num_of_resolutions;
+        auto num_of_res = intrinsic.resolution.num_of_resolutions;
 
         for( auto i = 0; i < num_of_res; i++ )
         {
-            auto model = intrinsic->resolution.intrinsic_resolution[i];
-            if( model.height == profile.height && model.width == profile.width )
+            auto model = intrinsic.resolution.intrinsic_resolution[i];
+            if( model.height == height && model.width == width )
             {
                 rs2_intrinsics intrinsics;
                 intrinsics.width = model.width;
@@ -197,7 +229,9 @@ namespace librealsense
                 intrinsics.ppx = model.ipm.principal_point.x;
                 intrinsics.ppy = model.ipm.principal_point.y;
 
-                if( model.distort.radial_k1 || model.distort.radial_k2 || model.distort.tangential_p1 || model.distort.tangential_p2 || model.distort.radial_k3 )
+                if( model.distort.radial_k1 || model.distort.radial_k2
+                    || model.distort.tangential_p1 || model.distort.tangential_p2
+                    || model.distort.radial_k3 )
                 {
                     intrinsics.coeffs[0] = model.distort.radial_k1;
                     intrinsics.coeffs[1] = model.distort.radial_k2;
@@ -205,13 +239,55 @@ namespace librealsense
                     intrinsics.coeffs[3] = model.distort.tangential_p2;
                     intrinsics.coeffs[4] = model.distort.radial_k3;
 
-                    intrinsics.model = RS2_DISTORTION_INVERSE_BROWN_CONRADY;
+                    intrinsics.model = l500_distortion;
+
                 }
 
                 return intrinsics;
             }
         }
-        throw std::runtime_error( to_string() << "intrinsics for resolution " << profile.width << "," << profile.height << " don't exist" );
+        throw std::runtime_error( to_string() << "intrinsics for resolution " << width << ","
+                                              << height << " don't exist" );
+    }
+
+    rs2_intrinsics normalize( const rs2_intrinsics & intr )
+    {
+        auto res = intr;
+        res.fx = 2 * intr.fx / intr.width;
+        res.fy = 2 * intr.fy / intr.height;
+        res.ppx = 2 * intr.ppx / intr.width - 1;
+        res.ppy = 2 * intr.ppy / intr.height - 1;
+
+        return res;
+    }
+
+    rs2_intrinsics
+    denormalize( const rs2_intrinsics & intr, const uint32_t & width, const uint32_t & height )
+    {
+        auto res = intr;
+
+        res.fx = intr.fx * width / 2;
+        res.fy = intr.fy * height / 2;
+        res.ppx = ( intr.ppx + 1 ) * width / 2;
+        res.ppy = ( intr.ppy + 1 ) * height / 2;
+
+        res.width = width;
+        res.height = height;
+
+        return res;
+    }
+
+
+    rs2_intrinsics l500_color_sensor::get_intrinsics( const stream_profile & profile ) const
+    {
+        if( ! _k_thermal_intrinsics)
+        {
+            // Until we've calculated temp-based intrinsics, simply use the camera-specified
+            // intrinsics
+            return get_raw_intrinsics( profile.width, profile.height );
+        }
+
+        return denormalize( *_k_thermal_intrinsics, profile.width, profile.height );
     }
 
 
@@ -226,17 +302,18 @@ namespace librealsense
                  { intr.d[0], intr.d[1], intr.d[2], intr.d[3], intr.d[4] } };
     }
 
-
     void ivcam2::rgb_calibration_table::set_intrinsics( rs2_intrinsics const & i )
     {
         // The table in FW is resolution-agnostic; it can apply to ALL resolutions. To
         // do this, the focal length and principal point are normalized:
+        auto norm = normalize( i );
+
         width = i.width;
         height = i.height;
-        intr.fx = 2 * i.fx / i.width;
-        intr.fy = 2 * i.fy / i.height;
-        intr.px = 2 * i.ppx / i.width - 1;
-        intr.py = 2 * i.ppy / i.height - 1;
+        intr.fx = norm.fx;
+        intr.fy = norm.fy;
+        intr.px = norm.ppx;
+        intr.py = norm.ppy;
         intr.d[0] = i.coeffs[0];
         intr.d[1] = i.coeffs[1];
         intr.d[2] = i.coeffs[2];
@@ -244,62 +321,20 @@ namespace librealsense
         intr.d[4] = i.coeffs[4];
     }
 
-
-    void l500_color_sensor::override_intrinsics( rs2_intrinsics const& intr )
+    void l500_color_sensor::set_k_thermal_intrinsics( rs2_intrinsics const & intr )
     {
-        // The distortion model is not part of the table. The FW assumes it is brown,
-        // but in LRS we (mistakenly) use INVERSE brown. We therefore make sure the user
-        // has not tried to change anything from the intrinsics reported:
-        if( intr.model != RS2_DISTORTION_INVERSE_BROWN_CONRADY )
-            throw invalid_value_exception( "invalid intrinsics distortion model" );
 
-        rgb_calibration_table table;
-        AC_LOG( DEBUG, "Reading RGB calibration table 0x" << std::hex << table.table_id );
-        ivcam2::read_fw_table( *_owner->_hw_monitor, table.table_id, &table );
-        AC_LOG( DEBUG, "    version:     " << table.version );
-        AC_LOG( DEBUG, "    timestamp:   " << table.timestamp << "; incrementing" );
-        AC_LOG( DEBUG, "    type:        " << table.type << "; setting to 0x10" );
-        AC_LOG( DEBUG, "    intrinsics:  " << table.get_intrinsics() );
-        table.set_intrinsics( intr );
-        AC_LOG( INFO, "Overriding intr: " << intr );
-        AC_LOG( DEBUG, "    normalized:  " << table.get_intrinsics() );
-        table.update_write_fields();
-        write_fw_table( *_owner->_hw_monitor, table.table_id, table );
-        AC_LOG( DEBUG, "    done" );
-
-        // Intrinsics are resolution-specific, so all the rest of the profile info is not
-        // important
-        _owner->_color_intrinsics_table_raw.reset();
+        _k_thermal_intrinsics = std::make_shared< rs2_intrinsics >( normalize(intr) );
     }
 
-    void l500_color_sensor::override_extrinsics( rs2_extrinsics const& extr )
+    void l500_color_sensor::reset_k_thermal_intrinsics() 
     {
-        rgb_calibration_table table;
-        AC_LOG( DEBUG, "Reading RGB calibration table 0x" << std::hex << table.table_id );
-        ivcam2::read_fw_table( *_owner->_hw_monitor, table.table_id, &table );
-        AC_LOG( DEBUG, "    version:     " << table.version );
-        AC_LOG( DEBUG, "    timestamp:   " << table.timestamp << "; incrementing" );
-        AC_LOG( DEBUG, "    type:        " << table.type << "; setting to 0x10" );
-        AC_LOG( DEBUG, "    raw extr:    " << table.get_extrinsics() );
-        table.extr = to_raw_extrinsics(extr);
-        AC_LOG( INFO , "Overriding extr: " << extr );
-        table.update_write_fields();
-        AC_LOG( DEBUG, "    as raw:      " << table.get_extrinsics());
-        ivcam2::write_fw_table( *_owner->_hw_monitor, table.table_id, table );
-        AC_LOG( DEBUG, "    done" );
-
-
-        environment::get_instance().get_extrinsics_graph().override_extrinsics( *_owner->_depth_stream, *_owner->_color_stream, extr );
+        _k_thermal_intrinsics.reset();
     }
 
-    rs2_dsm_params l500_color_sensor::get_dsm_params() const
+    algo::thermal_loop::l500::thermal_calibration_table l500_color_sensor::get_thermal_table() const
     {
-        throw std::logic_error( "color sensor does not support DSM parameters" );
-    }
-
-    void l500_color_sensor::override_dsm_params( rs2_dsm_params const & dsm )
-    {
-        throw std::logic_error( "color sensor does not support DSM parameters" );
+        return *_owner->_thermal_table;
     }
 
     void ivcam2::rgb_calibration_table::update_write_fields()
@@ -314,51 +349,161 @@ namespace librealsense
         ++timestamp;
     }
 
-    void l500_color_sensor::reset_calibration()
+    void l500_color_sensor::start(frame_callback_ptr callback)
     {
-        // Read from EEPROM (factory defaults), write to FLASH (current)
-        // Note that factory defaults may be different than the trinsics at the time of
-        // our initialization!
-        rgb_calibration_table table;
-        AC_LOG( DEBUG, "Reading factory calibration from table 0x" << std::hex << table.eeprom_table_id );
-        ivcam2::read_fw_table( *_owner->_hw_monitor, table.eeprom_table_id, &table );
-        AC_LOG( DEBUG, "    version:     " << table.version );
-        AC_LOG( DEBUG, "    timestamp:   " << table.timestamp << "; incrementing" );
-        AC_LOG( DEBUG, "    type:        " << table.type << "; setting to 0x10" );
-        AC_LOG( DEBUG, "Normalized:" );
-        AC_LOG( DEBUG, "    intrinsics:  " << table.get_intrinsics() );
-        AC_LOG( DEBUG, "    extrinsics:  " << table.get_extrinsics() );
-        AC_LOG( DEBUG, "Writing RGB calibration table 0x" << std::hex << table.table_id );
-        ivcam2::write_fw_table( *_owner->_hw_monitor, table.table_id, table );
-        AC_LOG( DEBUG, "    done" );
+        std::lock_guard<std::mutex> lock(_state_mutex);
 
-        _owner->_color_intrinsics_table_raw.reset();
+        if (_state != sensor_state::OWNED_BY_USER)
+            throw wrong_api_call_sequence_exception("tried to start an unopened sensor");
 
-         environment::get_instance().get_extrinsics_graph().override_extrinsics(
-            *_owner->_depth_stream,
-            *_owner->_color_stream,
-             from_raw_extrinsics(table.get_extrinsics()));
-        AC_LOG( INFO, "Color sensor calibration has been reset" );
+        if (supports_option(RS2_OPTION_HOST_PERFORMANCE))
+        {
+            // option to improve performance and stability on weak android hosts
+            // please refer to following bug report for details
+            // RS5-8011 [Android-L500 Hard failure] Device detach and disappear from system during stream
+
+            auto host_perf = get_option(RS2_OPTION_HOST_PERFORMANCE).query();
+
+            if (host_perf == RS2_HOST_PERF_LOW || host_perf == RS2_HOST_PERF_HIGH)
+            {
+                // TPROC USB Granularity and TRB threshold settings for improved performance and stability
+                // on hosts with weak cpu and system performance
+                // settings values are validated through many experiments, do not change
+
+                // on low power low performance host, usb trb set to larger granularity to reduce number of transactions
+                // and improve performance
+                int usb_trb = 7;       // 7 KB
+
+                if (host_perf == RS2_HOST_PERF_LOW)
+                {
+                    usb_trb = 32;      // 32 KB
+                }
+
+                try {
+                    // Keep the USB power on while triggering multiple calls on it.
+                    ivcam2::group_multiple_fw_calls(*this, [&]() {
+                        // endpoint 5 - 32KB
+                        command cmdTprocGranEp5(ivcam2::TPROC_USB_GRAN_SET, 5, usb_trb);
+                        _owner->_hw_monitor->send(cmdTprocGranEp5);
+
+                        command cmdTprocThresholdEp5(ivcam2::TPROC_TRB_THRSLD_SET, 5, 1);
+                        _owner->_hw_monitor->send(cmdTprocThresholdEp5);
+                        });
+                    LOG_DEBUG("Color usb tproc granularity and TRB threshold updated.");
+                } catch (...)
+                {
+                    LOG_WARNING("Failed to update color usb tproc granularity and TRB threshold. performance and stability maybe impacted on certain platforms.");
+                }
+            }
+            else if (host_perf == RS2_HOST_PERF_DEFAULT)
+            {
+                    LOG_DEBUG("Default host performance mode, color usb tproc granularity and TRB threshold not changed");
+            }
+        }
+
+        delayed_start(callback);
+    }
+
+    
+    void l500_color_sensor::stop()
+    {
+        std::lock_guard<std::mutex> lock(_state_mutex);
+        
+        // Protect not stopping the calibration color stream due to wrong API sequence
+        if (_state != sensor_state::OWNED_BY_USER)
+            throw wrong_api_call_sequence_exception("tried to stop sensor without starting it");
+
+        delayed_stop();
     }
 
 
+    void l500_color_sensor::open( const stream_profiles & requests )
+    {
+        std::lock_guard< std::mutex > lock( _state_mutex );
+
+        synthetic_sensor::open( requests );
+        set_sensor_state( sensor_state::OWNED_BY_USER );
+    }
+
+    
+    void l500_color_sensor::close()
+    {
+        std::lock_guard< std::mutex > lock( _state_mutex );
+
+        if( _state != sensor_state::OWNED_BY_USER )
+            throw wrong_api_call_sequence_exception( "tried to close sensor without opening it" );
+
+        synthetic_sensor::close();
+        set_sensor_state(sensor_state::CLOSED);
+    }
+
+    std::string l500_color_sensor::state_to_string(sensor_state state)
+    {
+        switch (state)
+        {
+        case sensor_state::CLOSED:
+            return "CLOSED";
+        case sensor_state::OWNED_BY_USER:
+            return "OWNED_BY_USER";
+        default:
+            LOG_DEBUG("Invalid color sensor state: " << static_cast<int>(state));
+            return "Unknown state";
+        }
+    }
 
     std::vector<tagged_profile> l500_color::get_profiles_tags() const
     {
         std::vector<tagged_profile> tags;
 
-        tags.push_back({ RS2_STREAM_COLOR, -1, 1280, 720, RS2_FORMAT_RGB8, 30, profile_tag::PROFILE_TAG_SUPERSET | profile_tag::PROFILE_TAG_DEFAULT });
+        bool usb3mode = (_usb_mode >= platform::usb3_type || _usb_mode == platform::usb_undefined);
+
+        int width = usb3mode ? 1280 : 960;
+        int height = usb3mode ? 720 : 540;
+
+        tags.push_back({ RS2_STREAM_COLOR, -1, width, height, RS2_FORMAT_RGB8, 30, profile_tag::PROFILE_TAG_SUPERSET | profile_tag::PROFILE_TAG_DEFAULT });
+
         return tags;
     }
 
-    std::vector<uint8_t> l500_color::get_raw_intrinsics_table() const
+    ivcam2::intrinsic_rgb l500_color::read_intrinsics_table() const
     {
-        AC_LOG( DEBUG, "RGB_INTRINSIC_GET" );
-        return _hw_monitor->send(command{ RGB_INTRINSIC_GET });
+        // Get RAW data from firmware
+        LOG_DEBUG( "RGB_INTRINSIC_GET" );
+        std::vector< uint8_t > response_vec = _hw_monitor->send(command{ RGB_INTRINSIC_GET });
+
+        if (response_vec.empty())
+            throw invalid_value_exception("Calibration data invalid,buffer size is zero");
+
+        auto resolutions_rgb_table_ptr = reinterpret_cast<const ivcam2::intrinsic_rgb *>(response_vec.data());
+        auto num_of_resolutions = resolutions_rgb_table_ptr->resolution.num_of_resolutions;
+
+        // Get full maximum size of the resolution array and deduct the unused resolutions size from it
+        size_t expected_size = sizeof( ivcam2::intrinsic_rgb )
+                                - ( ( MAX_NUM_OF_RGB_RESOLUTIONS
+                                - num_of_resolutions)
+                                * sizeof( pinhole_camera_model ) );
+
+        // Validate table size
+        // FW API guarantee only as many bytes as required for the given number of resolutions, 
+        // The FW keeps the right to send more bytes.
+        if (expected_size > response_vec.size() ||
+            num_of_resolutions > MAX_NUM_OF_RGB_RESOLUTIONS)
+        {
+            throw invalid_value_exception(
+                to_string() << "Calibration data invalid, number of resolutions is: " << num_of_resolutions <<
+                ", expected size: " << expected_size << " , actual size: " << response_vec.size());
+        }
+
+        // Set a new memory allocated intrinsics struct (Full size 5 resolutions)
+        // Copy the relevant data from the dynamic resolution received from the FW
+        ivcam2::intrinsic_rgb  resolutions_rgb_table_output;
+        librealsense::copy(&resolutions_rgb_table_output, resolutions_rgb_table_ptr, expected_size);
+
+        return resolutions_rgb_table_output;
     }
     std::vector<uint8_t> l500_color::get_raw_extrinsics_table() const
     {
-        AC_LOG( DEBUG, "RGB_EXTRINSIC_GET" );
+        LOG_DEBUG( "RGB_EXTRINSIC_GET" );
         return _hw_monitor->send(command{ RGB_EXTRINSIC_GET });
     }
 }

@@ -6,14 +6,13 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.os.Bundle;
-import android.support.design.widget.FloatingActionButton;
-import android.support.v7.app.AppCompatActivity;
+import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import androidx.appcompat.app.AppCompatActivity;
 import android.util.Log;
 import android.util.Pair;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.RadioButton;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -28,7 +27,6 @@ import com.intel.realsense.librealsense.RsContext;
 import com.intel.realsense.librealsense.Sensor;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 public class PreviewActivity extends AppCompatActivity {
@@ -54,6 +52,8 @@ public class PreviewActivity extends AppCompatActivity {
     private boolean statsToggle = false;
     private boolean mShow3D = false;
 
+    boolean keepalive = true;
+
     public synchronized void toggleStats(){
         statsToggle = !statsToggle;
         if(statsToggle){
@@ -72,6 +72,15 @@ public class PreviewActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_preview);
+
+        keepalive = true;
+
+        Intent intent = this.getIntent();
+
+        if (intent != null && intent.getExtras() != null ) {
+            keepalive = intent.getExtras().getBoolean("keepalive");
+        }
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         mGLSurfaceView = findViewById(R.id.glSurfaceView);
@@ -204,6 +213,11 @@ public class PreviewActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
 
+        if(keepalive == false)
+        {
+            return;
+        }
+
         mStreamingStats  = new StreamingStats();
         mStreamer = new Streamer(this, true, new Streamer.Listener() {
             @Override
@@ -261,68 +275,6 @@ public class PreviewActivity extends AppCompatActivity {
         pauseBackgroundTasks();
     }
 
-    public void onRadioButtonClicked(View view) {
-        // TODO - Ariel - Move touch logic into controls fragment. Only Sensor's logic should stay here.
-        // TODO - Ariel - Add more controls
-        boolean checked = ((RadioButton) view).isChecked();
-
-        if(!checked)
-            return;
-        RsContext ctx = new RsContext();
-        try(DeviceList devices = ctx.queryDevices()) {
-            try(Device device = devices.createDevice(0)){
-                if(device == null)
-                    return;
-                List<Sensor> sensors = device.querySensors();
-                for(Sensor s : sensors){
-                    if(s.supports(Option.EMITTER_ENABLED)) {
-                        switch(view.getId()) {
-                            case R.id.radio_no_projector:{
-                                setOption(s, Option.EMITTER_ENABLED, 0);
-                                break;
-                            }
-                            case R.id.radio_laser:{
-                                setOption(s, Option.EMITTER_ENABLED, 1);
-                                break;
-                            }
-                            case R.id.radio_laser_auto:{
-                                setOption(s, Option.EMITTER_ENABLED, 2);
-                                break;
-                            }
-                            case R.id.radio_led:{
-                                setOption(s, Option.EMITTER_ENABLED, 3);
-                                break;
-                            }
-                        }
-                    }
-                    if(s.supports(Option.HARDWARE_PRESET)) {
-                        switch(view.getId()) {
-                            case R.id.radio_custom:{
-                                setOption(s, Option.HARDWARE_PRESET, 0);
-                                break;
-                            }
-                            case R.id.radio_burst:{
-                                setOption(s, Option.HARDWARE_PRESET, 2);
-                                break;
-                            }
-                        }
-                    }
-
-                }
-            } catch(Exception e){
-                Log.e(TAG, "Failed to set controls: " + e.getMessage());
-                Toast.makeText(this, "Failed to set controls", Toast.LENGTH_LONG).show();
-            }
-        }
-    }
-
-    private void setOption(Sensor s, Option option, int val) {
-        if(s.supports(option))
-            s.setValue(option, val);
-        else
-            Toast.makeText(this, "This control is not supported by this device", Toast.LENGTH_LONG).show();
-    }
-
     private synchronized void resumeBackgroundTasks() {
         resumeFwLogger();
     }
@@ -360,4 +312,21 @@ public class PreviewActivity extends AppCompatActivity {
         }
         mFwLogsRunning = false;
     }
+
+    @Override
+    protected void onNewIntent(Intent intent)
+    {
+        super.onNewIntent(intent);
+
+        if (intent != null && intent.getExtras() != null ) {
+            keepalive = intent.getExtras().getBoolean("keepalive");
+        }
+
+        // destroy activity if requested
+        if(keepalive == false)
+        {
+            PreviewActivity.this.finish();
+        }
+    }
+
 }

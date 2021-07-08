@@ -3,11 +3,11 @@
 
 #pragma once
 
-#include "core/processing.h"
-#include "image.h"
-#include "source.h"
-#include "../include/librealsense2/hpp/rs_frame.hpp"
-#include "../include/librealsense2/hpp/rs_processing.hpp"
+#include "../core/processing.h"
+#include "../image.h"
+#include "../source.h"
+#include <librealsense2/hpp/rs_frame.hpp>
+#include <librealsense2/hpp/rs_processing.hpp>
 
 namespace librealsense
 {
@@ -220,7 +220,7 @@ namespace librealsense
                 // will only read from the currently selected
                 // block, setting an option will propogate
                 // to all blocks in the group
-                for (int i = 0; i < _parent->_processing_blocks.size(); i++)
+                for (size_t i = 0; i < _parent->_processing_blocks.size(); i++)
                 {
                     if (_parent->_processing_blocks[i]->supports_option(_opt))
                     {

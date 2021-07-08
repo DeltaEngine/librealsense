@@ -60,6 +60,11 @@ static const double r2d = 180 / pi;
 template<typename T> T deg2rad(T val) { return T(val * d2r); }
 template<typename T> T rad2deg(T val) { return T(val * r2d); }
 
+// global abs() is only defined for int for some GCC impl on Linux, meaning we may
+// get unwanted behavior without any warning whatsoever. Instead, we want to use the
+// C++ version in std!
+using std::abs;
+
 #pragma warning(disable: 4250)
 
 #ifdef ANDROID
@@ -199,6 +204,8 @@ namespace librealsense
     void log_to_console(rs2_log_severity min_severity);
     void log_to_file( rs2_log_severity min_severity, const char* file_path );
     void log_to_callback( rs2_log_severity min_severity, log_callback_ptr callback );
+    void reset_logger();
+    void enable_rolling_log_file( unsigned max_size );
 
 #if BUILD_EASYLOGGINGPP
 
@@ -251,11 +258,6 @@ namespace librealsense
 #endif
     }
 
-#ifdef BUILD_INTERNAL_UNIT_TESTS
-#define PRIVATE_TESTABLE public
-#else
-#define PRIVATE_TESTABLE private
-#endif
     //////////////////////////
     // Exceptions mechanism //
     //////////////////////////
@@ -388,8 +390,9 @@ namespace librealsense
         operator T () const
         {
             T le_value = 0;
-            for (unsigned int i = 0; i < sizeof(T); ++i) reinterpret_cast<char *>(&le_value)[i] = reinterpret_cast<const char *>(&be_value)[sizeof(T) - i - 1];
+            for (unsigned int i = 0; i < sizeof(T); ++i) *(reinterpret_cast<char*>(&le_value) + i) = *(reinterpret_cast<const char*>(&be_value) + sizeof(T) - i - 1);
             return le_value;
+
         }
     };
 #pragma pack(pop)
@@ -503,9 +506,11 @@ namespace librealsense
     // Enumerated type support //
     /////////////////////////////
 
+// Require the last enumerator value to be in format of RS2_#####_COUNT
 #define RS2_ENUM_HELPERS( TYPE, PREFIX )                                                           \
     RS2_ENUM_HELPERS_CUSTOMIZED( TYPE, 0, RS2_##PREFIX##_COUNT - 1 )
 
+// This macro can be used directly if needed to support enumerators with no RS2_#####_COUNT last value
 #define RS2_ENUM_HELPERS_CUSTOMIZED( TYPE, FIRST, LAST )                                           \
     LRS_EXTENSION_API const char * get_string( TYPE value );                                       \
     inline bool is_valid( TYPE value ) { return value >= FIRST && value <= LAST; }                 \
@@ -518,7 +523,7 @@ namespace librealsense
     }                                                                                              \
     inline bool try_parse( const std::string & str, TYPE & res )                                   \
     {                                                                                              \
-        for( int i = FIRST; i < LAST; i++ )                                                        \
+        for( int i = FIRST; i <= LAST; i++ )                                                       \
         {                                                                                          \
             auto v = static_cast< TYPE >( i );                                                     \
             if( str == get_string( v ) )                                                           \
@@ -537,6 +542,7 @@ namespace librealsense
     RS2_ENUM_HELPERS(rs2_camera_info, CAMERA_INFO)
     RS2_ENUM_HELPERS(rs2_frame_metadata_value, FRAME_METADATA)
     RS2_ENUM_HELPERS(rs2_timestamp_domain, TIMESTAMP_DOMAIN)
+    RS2_ENUM_HELPERS(rs2_calib_target_type, CALIB_TARGET)
     RS2_ENUM_HELPERS(rs2_sr300_visual_preset, SR300_VISUAL_PRESET)
     RS2_ENUM_HELPERS(rs2_extension, EXTENSION)
     RS2_ENUM_HELPERS(rs2_exception_type, EXCEPTION_TYPE)
@@ -549,18 +555,65 @@ namespace librealsense
     RS2_ENUM_HELPERS(rs2_calibration_type, CALIBRATION_TYPE)
     RS2_ENUM_HELPERS_CUSTOMIZED(rs2_calibration_status, RS2_CALIBRATION_STATUS_FIRST, RS2_CALIBRATION_STATUS_LAST )
     RS2_ENUM_HELPERS_CUSTOMIZED(rs2_ambient_light, RS2_AMBIENT_LIGHT_NO_AMBIENT, RS2_AMBIENT_LIGHT_LOW_AMBIENT)
+    RS2_ENUM_HELPERS_CUSTOMIZED(rs2_digital_gain, RS2_DIGITAL_GAIN_HIGH, RS2_DIGITAL_GAIN_LOW)
+    RS2_ENUM_HELPERS(rs2_host_perf_mode, HOST_PERF)
 
 
     ////////////////////////////////////////////
     // World's tiniest linear algebra library //
     ////////////////////////////////////////////
-#pragma pack(push, 1)
-    struct int2 { int x, y; };
-    struct float2 { float x, y; float & operator [] (int i) { return (&x)[i]; } };
-    struct float3 { float x, y, z; float & operator [] (int i) { return (&x)[i]; } };
-    struct float4 { float x, y, z, w; float & operator [] (int i) { return (&x)[i]; } };
-    struct float3x3 { float3 x, y, z; float & operator () (int i, int j) { return (&x)[j][i]; } }; // column-major
-    struct pose { float3x3 orientation; float3 position; };
+#pragma pack( push, 1 )
+    struct int2
+    {
+        int x, y;
+    };
+    struct float2
+    {
+        float x, y;
+        float & operator[]( int i )
+        {
+            assert( i >= 0 );
+            assert( i < 2 );
+            return *( &x + i );
+        }
+    };
+    struct float3
+    {
+        float x, y, z;
+        float & operator[]( int i )
+        {
+            assert( i >= 0 );
+            assert( i < 3 );
+            return ( *( &x + i ) );
+        }
+    };
+    struct float4
+    {
+        float x, y, z, w;
+        float & operator[]( int i )
+        {
+            assert( i >= 0 );
+            assert( i < 4 );
+            return ( *( &x + i ) );
+        }
+    };
+    struct float3x3
+    {
+        float3 x, y, z;
+        float & operator()( int i, int j )
+        {
+            assert( i >= 0 );
+            assert( i < 3 );
+            assert( j >= 0 );
+            assert( j < 3 );
+            return ( *( &x[0] + j * sizeof( float3 ) / sizeof( float ) + i ) );
+        }
+    };  // column-major
+    struct pose
+    {
+        float3x3 orientation;
+        float3 position;
+    };
 #pragma pack(pop)
     inline bool operator == (const float3 & a, const float3 & b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
     inline float3 operator + (const float3 & a, const float3 & b) { return{ a.x + b.x, a.y + b.y, a.z + b.z }; }
@@ -1541,7 +1594,7 @@ namespace librealsense
 
         void polling(dispatcher::cancellable_timer cancellable_timer)
         {
-            if(cancellable_timer.try_sleep(5000))
+            if(cancellable_timer.try_sleep( std::chrono::milliseconds( POLLING_DEVICES_INTERVAL_MS )))
             {
                 platform::backend_device_group curr(_backend->query_uvc_devices(), _backend->query_usb_devices(), _backend->query_hid_devices());
                 if(list_changed(_devices_data.uvc_devices, curr.uvc_devices ) ||
@@ -1769,7 +1822,6 @@ namespace librealsense
         bool _valid;
         T _value;
     };
-
 }
 
 inline std::ostream& operator<<( std::ostream& out, rs2_extrinsics const & e )
